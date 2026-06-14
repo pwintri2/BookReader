@@ -33,8 +33,8 @@
   },
   "bundle": {
     "active": true,
-    "icon": [],
-    "targets": ["deb", "appimage"],
+    "icon": ["icons/icon.png"],
+    "targets": ["deb"],
     "category": "Utility",
     "shortDescription": "Long-form text, DOCX and PDF reader",
     "longDescription": "BookReader imports long text, DOCX and PDF files, divides them into chapters, and reads chapters aloud with local speech synthesis.",

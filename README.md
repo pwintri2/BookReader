@@ -35,6 +35,21 @@ For the desktop app:
 npm run tauri -- dev
 ```
 
+## Desktop Launcher
+
+The repository includes `scripts/bookreader-launch.sh` for local desktop use. It starts the BookReader API when needed and then opens the Tauri app. A Linux `.desktop` entry can point to this script:
+
+```text
+Exec=/home/pwintri2/BookReader/scripts/bookreader-launch.sh
+Icon=/home/pwintri2/BookReader/public/icons/bookreader.svg
+```
+
+The launcher writes API logs to:
+
+```text
+~/.local/state/bookreader/api.log
+```
+
 ## Useful Commands
 
 ```bash

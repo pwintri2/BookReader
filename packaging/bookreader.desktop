@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=BookReader
+GenericName=Book Reader
+Comment=Read books, generate stories, and create illustrations
+Exec=/home/pwintri2/BookReader/scripts/bookreader-launch.sh
+Icon=/home/pwintri2/BookReader/public/icons/bookreader.svg
+Terminal=false
+Categories=Office;
+StartupNotify=true
+StartupWMClass=ai.wintrip.bookreader
+Keywords=Book;Reader;Story;TTS;ComfyUI;DeepSeek;
