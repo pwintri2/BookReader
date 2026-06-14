@@ -1,0 +1,32 @@
+{
+  "name": "bookreader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1432",
+    "dev:mobile": "vite --host 0.0.0.0 --port 1432",
+    "api": "node server/bookreader-api.mjs",
+    "build": "tsc && vite build",
+    "preview:mobile": "vite preview --host 0.0.0.0 --port 1432",
+    "test": "vitest run",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.4.0",
+    "lucide-react": "^0.468.0",
+    "mammoth": "^1.8.0",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.4.0",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "BookReader",
+  "short_name": "BookReader",
+  "description": "Lees lange boeken, laat hoofdstukken voorlezen en maak illustraties via een optionele serverlaag.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#101214",
+  "theme_color": "#167f78",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icons/bookreader-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/bookreader-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

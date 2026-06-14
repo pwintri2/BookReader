@@ -1,0 +1,19 @@
+[package]
+name = "bookreader"
+version = "0.1.0"
+description = "Standalone desktop reader for long text, docx and pdf files"
+authors = ["WintripAI"]
+license = ""
+repository = ""
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = [] }
+tauri-plugin-single-instance = "2.0"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
