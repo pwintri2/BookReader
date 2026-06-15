@@ -401,6 +401,87 @@ textarea:focus {
   line-height: 1.45;
 }
 
+.film-plan {
+  display: grid;
+  gap: 10px;
+}
+
+.film-plan-summary {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid rgba(105, 208, 187, 0.28);
+  border-radius: 8px;
+  background: #101719;
+}
+
+.film-plan-summary strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.film-plan-summary span,
+.film-plan-summary p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.film-scene-list {
+  display: grid;
+  gap: 8px;
+  max-height: 430px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.film-scene-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #121719;
+}
+
+.film-scene-card header {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.film-scene-card header > span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  color: #101214;
+  background: var(--accent-2);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.film-scene-card strong {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.film-scene-card small,
+.film-scene-card p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.film-scene-card button {
+  justify-self: start;
+}
+
 .portrait-card {
   display: grid;
   gap: 10px;

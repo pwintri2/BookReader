@@ -37,6 +37,8 @@ const CONTEXT_TIMEOUT_MS = Number(process.env.BOOKREADER_CONTEXT_TIMEOUT_MS || 3
 const DEEP_CONTEXT_TIMEOUT_MS = Number(process.env.BOOKREADER_DEEP_CONTEXT_TIMEOUT_MS || 120000);
 const STORY_TIMEOUT_MS = Number(process.env.BOOKREADER_STORY_TIMEOUT_MS || 180000);
 const DEEP_STORY_TIMEOUT_MS = Number(process.env.BOOKREADER_DEEP_STORY_TIMEOUT_MS || 360000);
+const FILM_TIMEOUT_MS = Number(process.env.BOOKREADER_FILM_TIMEOUT_MS || 180000);
+const DEEP_FILM_TIMEOUT_MS = Number(process.env.BOOKREADER_DEEP_FILM_TIMEOUT_MS || 360000);
 const PROJECT_FILE_MAX_BYTES = Number(process.env.BOOKREADER_PROJECT_FILE_MAX_BYTES || 50 * 1024 * 1024);
 
 const NAME_FALSE_POSITIVES = new Set([
@@ -315,6 +317,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/film/plan") {
+      await handleFilmPlan(req, res);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/settings/deepseek-key") {
       await handleDeepSeekKeySave(req, res);
       return;
@@ -392,6 +399,13 @@ function healthPayload() {
       deepModel: DEEP_STORY_MODEL,
       timeoutMs: STORY_TIMEOUT_MS,
       deepTimeoutMs: DEEP_STORY_TIMEOUT_MS,
+    },
+    film: {
+      provider: "ollama",
+      model: STORY_MODEL,
+      deepModel: DEEP_STORY_MODEL,
+      timeoutMs: FILM_TIMEOUT_MS,
+      deepTimeoutMs: DEEP_FILM_TIMEOUT_MS,
     },
     deepseekApi: {
       configured: Boolean(DEEPSEEK_API_KEY),
@@ -539,6 +553,7 @@ function normalizeBookReaderProject(project, fallbackSavedAt) {
     characterPortraits: Array.isArray(project.characterPortraits) ? project.characterPortraits : [],
     bookCover: project.bookCover && typeof project.bookCover === "object" ? project.bookCover : undefined,
     contextAnalysis: project.contextAnalysis,
+    filmPlan: project.filmPlan,
   };
 }
 
@@ -963,6 +978,180 @@ async function handleStoryGenerate(req, res) {
     requestedWords: targetWords,
     language,
     wordCount: countWords(story),
+  });
+}
+
+async function handleFilmPlan(req, res) {
+  const body = await readJson(req);
+  const title = String(body.title || "Untitled").slice(0, 220);
+  const rawText = normalizeText(body.rawText || "");
+  const mode = body.mode === "deep" ? "deep" : "fast";
+  const provider = body.provider === "api" ? "api" : "local";
+  const localModel = mode === "deep" ? DEEP_STORY_MODEL : STORY_MODEL;
+  const model = provider === "api" ? DEEPSEEK_API_STORY_MODEL : localModel;
+  const timeoutMs = mode === "deep" ? DEEP_FILM_TIMEOUT_MS : FILM_TIMEOUT_MS;
+  const targetMinutes = clampNumber(Number(body.targetMinutes || 7), 5, 10);
+  const sceneCount = clampNumber(Number(body.sceneCount || targetMinutes * 2), 6, 24);
+  const style = String(body.style || "cinematic").slice(0, 120);
+  const sourceText = rawText.slice(0, mode === "deep" ? 70000 : 36000);
+
+  if (!sourceText.trim()) {
+    await sendJson(res, 400, { ok: false, error: "empty_text" });
+    return;
+  }
+
+  const fallbackPlan = buildHeuristicFilmPlan({
+    title,
+    rawText: sourceText,
+    targetMinutes,
+    sceneCount,
+    style,
+  });
+  const prompt = buildFilmPlanPrompt({
+    title,
+    rawText: sourceText,
+    targetMinutes,
+    sceneCount,
+    style,
+    fallbackPlan,
+  });
+
+  if (provider === "api") {
+    const apiResult = await runDeepSeekApiChat({
+      res,
+      model,
+      messages: [
+        {
+          role: "system",
+          content: "You are BookReader's film adaptation director. Return only compact valid JSON. Do not include markdown, notes, or hidden reasoning.",
+        },
+        { role: "user", content: prompt },
+      ],
+      temperature: mode === "deep" ? 0.18 : 0.24,
+      maxTokens: mode === "deep" ? 9000 : 5200,
+      responseFormat: { type: "json_object" },
+      timeoutMs,
+      timeoutError: "film_model_timeout",
+      timeoutMessage: `DeepSeek API-filmplan duurde langer dan ${timeoutMs} ms. Probeer minder scènes of het snelle model.`,
+      unreachableError: "film_model_unreachable",
+      unreachableMessage: "DeepSeek API kon niet worden bereikt voor het filmplan.",
+      failureError: "film_model_failed",
+    });
+    if (apiResult.clientClosed) return;
+    if (!apiResult.ok) {
+      await sendJson(res, apiResult.status, apiResult.payload);
+      return;
+    }
+
+    const parsed = parseModelJson(apiResult.content);
+    if (!parsed) {
+      await sendJson(res, 200, {
+        ok: true,
+        provider: "deepseek-api",
+        model,
+        mode,
+        fallbackUsed: true,
+        warning: "DeepSeek API gaf geen geldige JSON terug; lokaal filmplan gebruikt.",
+        plan: fallbackPlan,
+        preview: String(apiResult.content || "").slice(0, 1200),
+      });
+      return;
+    }
+
+    await sendJson(res, 200, {
+      ok: true,
+      provider: "deepseek-api",
+      model,
+      mode,
+      fallbackUsed: false,
+      plan: normalizeFilmPlan(parsed, fallbackPlan),
+    });
+    return;
+  }
+
+  const available = await isOllamaModelAvailable(model);
+  if (!available) {
+    await sendJson(res, 200, {
+      ok: true,
+      provider: "heuristic",
+      model,
+      mode,
+      fallbackUsed: true,
+      warning: `Ollama model ${model} is niet beschikbaar; lokaal filmplan gebruikt.`,
+      plan: fallbackPlan,
+    });
+    return;
+  }
+
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => abortController.abort(new Error("film_timeout")), timeoutMs);
+  res.on("close", () => {
+    if (!res.writableEnded) abortController.abort(new Error("client_closed"));
+  });
+
+  let response;
+  try {
+    response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        prompt,
+        stream: false,
+        format: "json",
+        options: {
+          temperature: mode === "deep" ? 0.2 : 0.26,
+          num_ctx: mode === "deep" ? 8192 : 4096,
+          num_predict: mode === "deep" ? 6500 : 3600,
+        },
+        keep_alive: "10m",
+      }),
+      signal: abortController.signal,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "client_closed") return;
+    await sendJson(res, 200, {
+      ok: true,
+      provider: "heuristic",
+      model,
+      mode,
+      fallbackUsed: true,
+      warning:
+        message === "film_timeout"
+          ? `Filmplan duurde langer dan ${timeoutMs} ms; lokaal filmplan gebruikt.`
+          : "Ollama kon niet worden bereikt; lokaal filmplan gebruikt.",
+      plan: fallbackPlan,
+    });
+    return;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    await sendJson(res, 200, {
+      ok: true,
+      provider: "heuristic",
+      model,
+      mode,
+      fallbackUsed: true,
+      warning: "Ollama gaf een fout terug; lokaal filmplan gebruikt.",
+      plan: fallbackPlan,
+      details: payload,
+    });
+    return;
+  }
+
+  const parsed = parseModelJson(String(payload.response || ""));
+  await sendJson(res, 200, {
+    ok: true,
+    provider: parsed ? "ollama" : "heuristic",
+    model,
+    mode,
+    fallbackUsed: !parsed,
+    warning: parsed ? undefined : "Ollama gaf geen geldige JSON terug; lokaal filmplan gebruikt.",
+    plan: parsed ? normalizeFilmPlan(parsed, fallbackPlan) : fallbackPlan,
   });
 }
 
@@ -1500,6 +1689,349 @@ function extractReferenceHistory(sentences, characterNames) {
     .filter((sentence) => historyPattern.test(sentence) || (characterPattern && characterPattern.test(sentence) && sentence.length < 260))
     .slice(0, 10)
     .map((sentence) => truncate(sentence, 260));
+}
+
+function buildHeuristicFilmPlan({ title, rawText, targetMinutes, sceneCount, style }) {
+  const text = normalizeText(rawText);
+  const sentences = splitSentences(text);
+  const characters = collectCharacterDescriptions(text, "cinematic", 1).slice(0, 8);
+  const sceneSources = splitFilmSource(text, sceneCount);
+  const totalDurationSeconds = targetMinutes * 60;
+  const baseDuration = Math.max(20, Math.round(totalDurationSeconds / Math.max(1, sceneSources.length)));
+  const scenes = sceneSources.map((sourceBeat, index) => {
+    const source = typeof sourceBeat === "string" ? sourceBeat : sourceBeat.text;
+    const beatEmphasis = typeof sourceBeat === "string" ? "" : sourceBeat.emphasis;
+    const sourceSentences = splitSentences(source);
+    const location = extractLocation(sourceSentences) || "story location";
+    const directNames = characters
+      .filter((character) => source.toLowerCase().includes(character.name.toLowerCase()))
+      .map((character) => character.name)
+      .slice(0, 5);
+    const names = enrichFilmSceneCharacters(source, characters, directNames);
+    const mood = inferMood(source);
+    const actionSource = sourceSentences.slice(0, 3).join(" ") || source;
+    const action = truncate(beatEmphasis ? `${beatEmphasis} ${actionSource}` : actionSource, 520);
+    return {
+      id: `scene-${index + 1}`,
+      title: filmSceneTitle(source, index + 1),
+      durationSeconds: index === sceneSources.length - 1
+        ? Math.max(20, totalDurationSeconds - baseDuration * (sceneSources.length - 1))
+        : baseDuration,
+      sourceRange: typeof sourceBeat === "string" ? `fragment ${index + 1}/${sceneSources.length}` : sourceBeat.sourceRange,
+      purpose: filmScenePurpose(index, sceneSources.length),
+      location,
+      timeOfDay: inferTimeOfDay(source),
+      characters: names,
+      action,
+      dialogue: extractDialogue(source).slice(0, 3),
+      voiceOver: truncate(action, 280),
+      camera: filmCameraCue(index, sceneSources.length),
+      visualPrompt: buildFilmVisualPrompt({
+        title,
+        sceneTitle: filmSceneTitle(source, index + 1),
+        action,
+        location,
+        characters: names,
+        mood,
+        style,
+      }),
+      audioPrompt: buildFilmAudioPrompt({ action, location, mood }),
+      transition: index === sceneSources.length - 1 ? "fade out" : "cut on action",
+    };
+  });
+
+  return normalizeFilmPlan({
+    title: `${title || "Nieuw verhaal"} - korte film`,
+    logline: truncate(sentences.slice(0, 3).join(" "), 420),
+    targetMinutes,
+    totalDurationSeconds,
+    format: "short feature film",
+    visualStyle: filmVisualStyle(style),
+    continuityBible: buildFilmContinuityBible({ text, characters }),
+    scenes,
+  }, null);
+}
+
+function splitFilmSource(text, sceneCount) {
+  const paragraphs = String(text || "")
+    .split(/\n{2,}|(?=^##\s+)/gm)
+    .map((item) => normalizeText(item.replace(/^#+\s*/, "")))
+    .filter((item) => countWords(item) >= 12);
+  const units = paragraphs.length >= Math.min(sceneCount, 6) ? paragraphs : splitSentences(text);
+  if (!units.length) return [normalizeText(text)].filter(Boolean);
+  const target = Math.max(1, Math.min(sceneCount, 24));
+  if (units.length < target) {
+    return Array.from({ length: target }, (_, index) => {
+      const sourceIndex = Math.min(units.length - 1, Math.floor((index / target) * units.length));
+      const current = units[sourceIndex];
+      const next = units[Math.min(units.length - 1, sourceIndex + 1)];
+      const text = next && next !== current && index % 3 === 2 ? `${current} ${next}` : current;
+      return {
+        text,
+        sourceRange: `fragment ${sourceIndex + 1}/${units.length}`,
+        emphasis: filmBeatEmphasis(index, target),
+      };
+    });
+  }
+  const perScene = Math.ceil(units.length / target);
+  const chunks = [];
+  for (let index = 0; index < target; index += 1) {
+    const chunk = units.slice(index * perScene, (index + 1) * perScene).join(" ");
+    if (chunk) {
+      chunks.push({
+        text: chunk,
+        sourceRange: `fragment ${index + 1}/${target}`,
+        emphasis: "",
+      });
+    }
+  }
+  return chunks.slice(0, sceneCount);
+}
+
+function enrichFilmSceneCharacters(source, characters, directNames) {
+  const names = [...directNames];
+  const lower = normalizeText(source).toLowerCase();
+  const pronounCue = /\b(hij|zij|ze|haar|hem|zijn|he|she|her|him|his)\b/i.test(lower);
+  if (pronounCue && !names.length && characters[0]?.name) names.push(characters[0].name);
+  if (/\b(broer|brother)\b/i.test(lower)) names.push("her brother");
+  if (/\b(zus|sister)\b/i.test(lower)) names.push("her sister");
+  if (/\b(vader|father)\b/i.test(lower)) names.push("father");
+  if (/\b(moeder|mother)\b/i.test(lower)) names.push("mother");
+  return normalizeStringArray(names).slice(0, 5);
+}
+
+function normalizeFilmPlan(value, fallbackPlan) {
+  const record = value && typeof value === "object" ? value : {};
+  const fallback = fallbackPlan || {};
+  const fallbackScenes = Array.isArray(fallback.scenes) ? fallback.scenes : [];
+  const rawScenes = Array.isArray(record.scenes) ? record.scenes : fallbackScenes;
+  const scenes = rawScenes.map((scene, index) => normalizeFilmScene(scene, fallbackScenes[index], index)).filter(Boolean).slice(0, 24);
+  const targetMinutes = clampNumber(Number(record.targetMinutes || fallback.targetMinutes || 7), 5, 10);
+  const fallbackDuration = targetMinutes * 60;
+  const totalDurationSeconds = clampNumber(Number(record.totalDurationSeconds || fallback.totalDurationSeconds || fallbackDuration), 300, 600);
+  const balancedScenes = balanceFilmSceneDurations(scenes.length ? scenes : fallbackScenes, totalDurationSeconds);
+  return {
+    title: truncate(record.title || fallback.title || "Korte speelfilm", 180),
+    logline: truncate(record.logline || fallback.logline || "", 700),
+    targetMinutes,
+    totalDurationSeconds,
+    format: truncate(record.format || fallback.format || "short feature film", 120),
+    visualStyle: truncate(record.visualStyle || fallback.visualStyle || filmVisualStyle("cinematic"), 700),
+    continuityBible: normalizeFilmContinuity(record.continuityBible || fallback.continuityBible || {}),
+    scenes: balancedScenes,
+  };
+}
+
+function normalizeFilmScene(scene, fallback, index) {
+  const source = scene && typeof scene === "object" ? scene : {};
+  const base = fallback && typeof fallback === "object" ? fallback : {};
+  const title = truncate(source.title || base.title || `Scene ${index + 1}`, 140);
+  const action = truncate(source.action || source.description || base.action || "", 900);
+  if (!title && !action) return null;
+  return {
+    id: String(source.id || base.id || `scene-${index + 1}`),
+    title,
+    durationSeconds: clampNumber(Number(source.durationSeconds || base.durationSeconds || 45), 15, 180),
+    sourceRange: truncate(source.sourceRange || base.sourceRange || "", 120),
+    purpose: truncate(source.purpose || base.purpose || "", 260),
+    location: truncate(source.location || base.location || "", 220),
+    timeOfDay: truncate(source.timeOfDay || base.timeOfDay || "", 80),
+    characters: normalizeStringArray(source.characters || base.characters).slice(0, 8),
+    action,
+    dialogue: normalizeStringArray(source.dialogue || base.dialogue).slice(0, 5),
+    voiceOver: truncate(source.voiceOver || source.narration || base.voiceOver || "", 600),
+    camera: truncate(source.camera || base.camera || "", 360),
+    visualPrompt: truncate(source.visualPrompt || source.videoPrompt || base.visualPrompt || "", 1400),
+    audioPrompt: truncate(source.audioPrompt || base.audioPrompt || "", 600),
+    transition: truncate(source.transition || base.transition || "", 120),
+  };
+}
+
+function balanceFilmSceneDurations(scenes, totalDurationSeconds) {
+  const clean = Array.isArray(scenes) ? scenes.filter(Boolean) : [];
+  if (!clean.length) return [];
+  const currentTotal = clean.reduce((total, scene) => total + Number(scene.durationSeconds || 0), 0) || clean.length;
+  let remaining = totalDurationSeconds;
+  return clean.map((scene, index) => {
+    const isLast = index === clean.length - 1;
+    const nextDuration = isLast
+      ? Math.max(15, remaining)
+      : Math.max(15, Math.round((Number(scene.durationSeconds || 1) / currentTotal) * totalDurationSeconds));
+    remaining -= nextDuration;
+    return { ...scene, durationSeconds: nextDuration };
+  });
+}
+
+function normalizeFilmContinuity(value) {
+  const record = value && typeof value === "object" ? value : {};
+  return {
+    summary: truncate(record.summary || "", 900),
+    characters: normalizeStringArray(record.characters).slice(0, 12),
+    locations: normalizeStringArray(record.locations).slice(0, 12),
+    visualRules: normalizeStringArray(record.visualRules).slice(0, 14),
+    audioRules: normalizeStringArray(record.audioRules).slice(0, 10),
+  };
+}
+
+function buildFilmContinuityBible({ text, characters }) {
+  const sentences = splitSentences(text);
+  const locations = Array.from(new Set(sentences.map((sentence) => extractLocation([sentence])).filter(Boolean))).slice(0, 8);
+  return {
+    summary: truncate(sentences.slice(0, 5).join(" "), 900),
+    characters: characters.map((character) => `${character.name}: ${truncate(character.description, 220)}`).slice(0, 10),
+    locations,
+    visualRules: [
+      "Keep names, ages, clothing hints, objects and locations consistent across every shot.",
+      "Do not add unrelated crowds, extra main characters, genre switches, readable text, logos or watermark.",
+      "Each generated clip should cover one clean action beat with one camera idea.",
+    ],
+    audioRules: [
+      "Use narration to bridge time jumps instead of adding visual confusion.",
+      "Keep dialogue short enough to subtitle or voice later.",
+    ],
+  };
+}
+
+function buildFilmPlanPrompt({ title, rawText, targetMinutes, sceneCount, style, fallbackPlan }) {
+  return `You are BookReader's film adaptation director.
+Return ONLY valid JSON. No markdown, no commentary, no hidden reasoning.
+
+Goal:
+Convert the story into a coherent ${targetMinutes}-minute short feature film plan with ${sceneCount} playable scenes.
+
+Required JSON shape:
+{
+  "title": "",
+  "logline": "",
+  "targetMinutes": ${targetMinutes},
+  "totalDurationSeconds": ${targetMinutes * 60},
+  "format": "short feature film",
+  "visualStyle": "",
+  "continuityBible": {
+    "summary": "",
+    "characters": [],
+    "locations": [],
+    "visualRules": [],
+    "audioRules": []
+  },
+  "scenes": [
+    {
+      "id": "scene-1",
+      "title": "",
+      "durationSeconds": 45,
+      "sourceRange": "",
+      "purpose": "",
+      "location": "",
+      "timeOfDay": "",
+      "characters": [],
+      "action": "",
+      "dialogue": [],
+      "voiceOver": "",
+      "camera": "",
+      "visualPrompt": "",
+      "audioPrompt": "",
+      "transition": ""
+    }
+  ]
+}
+
+Direction rules:
+- Preserve the story. Do not invent a different plot, genre, era or ending.
+- Split by dramatic beats: setup, inciting incident, complications, midpoint, crisis, climax, resolution.
+- Scenes must add up to about ${targetMinutes * 60} seconds.
+- Use 6 to 24 scenes. Each scene must be filmable as a short clip.
+- visualPrompt must be English and suitable for local Wan/ComfyUI video generation: one action, one place, one camera idea, concrete characters, no readable text.
+- Keep the number of visible characters clear. Avoid crowds unless the text requires them.
+- Use voiceOver for narration bridges and dialogue for only important spoken lines.
+- Mention emotional continuity and recurring objects in continuityBible.
+- Requested visual style: ${style}.
+
+Grounded fallback structure you may improve but must not contradict:
+${JSON.stringify(fallbackPlan, null, 2)}
+
+Book title: ${title}
+Story text:
+${rawText}
+`;
+}
+
+function filmSceneTitle(source, index) {
+  const sentence = splitSentences(source)[0] || source;
+  const words = (sentence.match(/[\p{L}\p{N}]{4,}/gu) || [])
+    .filter((word) => !CHAPTER_TITLE_STOPWORDS.has(word.toLowerCase()))
+    .slice(0, 5);
+  return words.length ? toTitleCase(words.join(" ")) : `Scene ${index}`;
+}
+
+function filmScenePurpose(index, total) {
+  if (index === 0) return "opening image and story setup";
+  if (index === total - 1) return "resolution and final emotional image";
+  if (index < total * 0.25) return "inciting incident and first turn";
+  if (index < total * 0.55) return "rising complications";
+  if (index < total * 0.8) return "crisis and decision";
+  return "climax";
+}
+
+function filmBeatEmphasis(index, total) {
+  if (index === 0) return "Open with a clear establishing image and the main emotional tone.";
+  if (index === total - 1) return "Hold on the final emotional image and let the story resolve visually.";
+  const phase = index / Math.max(1, total - 1);
+  if (phase < 0.18) return "Show the first specific action that pulls the character into the scene.";
+  if (phase < 0.36) return "Focus on what the character notices, hears or understands next.";
+  if (phase < 0.55) return "Let the scene turn: the character makes a small choice or crosses a threshold.";
+  if (phase < 0.74) return "Build tension through a concrete obstacle, reveal or emotional reaction.";
+  if (phase < 0.9) return "Push toward the climax with a decisive movement or discovery.";
+  return "Prepare the closing beat while keeping the same characters and place readable.";
+}
+
+function filmCameraCue(index, total) {
+  if (index === 0) return "slow establishing shot, then move toward the main character";
+  if (index === total - 1) return "steady closing shot, hold on the final emotional image";
+  if (index % 3 === 0) return "wide shot into medium shot, gentle camera movement";
+  if (index % 3 === 1) return "medium close-up focused on the character's decision";
+  return "tracking shot following the action through the space";
+}
+
+function inferTimeOfDay(text) {
+  const lower = normalizeText(text).toLowerCase();
+  if (/\b(nacht|maan|middernacht|donker|night|moon|midnight|dark)\b/.test(lower)) return "night";
+  if (/\b(ochtend|morgen|dageraad|sunrise|morning|dawn)\b/.test(lower)) return "morning";
+  if (/\b(avond|schemer|zonsondergang|evening|dusk|sunset)\b/.test(lower)) return "evening";
+  return "unspecified";
+}
+
+function extractDialogue(text) {
+  const quoted = Array.from(String(text || "").matchAll(/[“"]([^”"]{3,180})[”"]/g)).map((match) => match[1]);
+  if (quoted.length) return quoted;
+  return splitSentences(text).filter((sentence) => /\b(zei|vroeg|riep|fluisterde|said|asked|called|whispered)\b/i.test(sentence)).slice(0, 3);
+}
+
+function buildFilmVisualPrompt({ title, sceneTitle, action, location, characters, mood, style }) {
+  return [
+    `Cinematic short film scene from "${title || "the story"}": ${toVisualEnglish(sceneTitle)}.`,
+    location ? `Location: ${toVisualEnglish(location)}.` : "",
+    characters.length ? `Visible characters: ${characters.join(", ")}.` : "Visible characters only if clearly described in the source.",
+    action ? `Action beat: ${toVisualEnglish(action)}.` : "",
+    mood ? `Mood: ${mood}.` : "",
+    filmVisualStyle(style),
+    "One continuous shot, coherent anatomy, consistent faces and costumes, no readable text, no watermark, no extra main characters.",
+  ].filter(Boolean).join(" ");
+}
+
+function buildFilmAudioPrompt({ action, location, mood }) {
+  return [
+    location ? `ambient sound for ${location}` : "subtle story ambience",
+    mood ? `${mood} music bed` : "restrained cinematic music bed",
+    action ? `sound follows: ${truncate(action, 180)}` : "",
+  ].filter(Boolean).join("; ");
+}
+
+function filmVisualStyle(style) {
+  const lower = normalizeText(style).toLowerCase();
+  if (lower.includes("graphic")) return "Polished graphic novel film look, clean silhouettes, controlled motion, vivid but grounded color.";
+  if (lower.includes("water")) return "Soft watercolor-inspired cinematic animation, controlled shapes, gentle lighting, not abstract.";
+  if (lower.includes("story")) return "Grounded storybook film look, warm cinematic lighting, readable emotional staging.";
+  return "Cinematic realistic animation, dramatic but tasteful lighting, shallow depth of field, stable character continuity.";
 }
 
 function buildStoryGenerationPrompt({
@@ -2263,7 +2795,7 @@ function buildCoverLock(characters, sceneBrief) {
   ].filter(Boolean).join(" ");
 }
 
-function collectCharacterDescriptions(text, style) {
+function collectCharacterDescriptions(text, style, minCount = 2) {
   const normalized = normalizeText(text);
   const sentences = splitSentences(normalized);
   const counts = new Map();
@@ -2278,7 +2810,7 @@ function collectCharacterDescriptions(text, style) {
 
   const stylePrompt = stylePromptSuffix(style);
   return Array.from(counts.entries())
-    .filter(([, count]) => count >= 2)
+    .filter(([, count]) => count >= minCount)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, 10)
     .map(([name, count], index) => {
@@ -2323,7 +2855,7 @@ function hasCharacterEvidence(sentences, name) {
   const escaped = escapeRegExp(name);
   const namePattern = new RegExp(`\\b${escaped}\\b`, "i");
   const subjectActionPattern = new RegExp(
-    `\\b${escaped}\\b\\s+(zei|vroeg|antwoordde|fluisterde|riep|dacht|voelde|keek|zag|liep|rende|wachtte|hielp|glimlachte|huilde|droeg|vond|opende|zocht|vertelde|beloofde|said|asked|answered|whispered|called|thought|felt|looked|saw|walked|ran|waited|helped|smiled|cried|wore|found|opened|searched|told|promised)\\b`,
+    `\\b${escaped}\\b\\s+(is|gaat|staat|loopt|hoort|ziet|kijkt|draait|opent|pakt|vindt|zoekt|luistert|zei|vroeg|antwoordde|fluisterde|riep|dacht|voelde|keek|zag|liep|rende|wachtte|hielp|glimlachte|huilde|droeg|vond|opende|zocht|vertelde|beloofde|is|goes|stands|walks|hears|sees|looks|turns|opens|takes|finds|searches|listens|said|asked|answered|whispered|called|thought|felt|looked|saw|walked|ran|waited|helped|smiled|cried|wore|found|opened|searched|told|promised)\\b`,
     "i",
   );
   const humanContext = /\b(hij|zij|haar|hem|zijn|vriend|vriendin|vader|moeder|zoon|dochter|broer|zus|man|vrouw|meisje|jongen|kind|persoon|personage|he|she|her|him|his|friend|father|mother|son|daughter|brother|sister|man|woman|girl|boy|child|person|character)\b/i;
@@ -2407,6 +2939,12 @@ function toVisualEnglish(text) {
     [/\bde\b/gi, "the"],
     [/\bhet\b/gi, "the"],
     [/\bzij\b/gi, "they"],
+    [/\bze\b/gi, "she"],
+    [/\bhaar\b/gi, "her"],
+    [/\bhij\b/gi, "he"],
+    [/\bhem\b/gi, "him"],
+    [/\bdoor\b/gi, "through"],
+    [/\bals\b/gi, "when"],
     [/\bvol\b/gi, "filled with"],
     [/\bvonden\b/gi, "found"],
     [/\bvertrouwde\b/gi, "trusted"],
@@ -2428,10 +2966,22 @@ function toVisualEnglish(text) {
     [/\boude?\b/gi, "old"],
     [/\bbrug\b/gi, "bridge"],
     [/\bdeur\b/gi, "door"],
+    [/\bgesloten\b/gi, "closed"],
+    [/\bverlaten\b/gi, "abandoned"],
+    [/\bstation\b/gi, "station"],
+    [/\btuin\b/gi, "garden"],
+    [/\bmaanlicht\b/gi, "moonlight"],
     [/\bstad\b/gi, "city"],
     [/\bkamer\b/gi, "room"],
     [/\blicht\b/gi, "light"],
+    [/\bhoort\b/gi, "hears"],
+    [/\bbroer\b/gi, "brother"],
+    [/\bachter\b/gi, "behind"],
+    [/\bfluister(de|en)?\b/gi, "whispering"],
+    [/\bopent\b/gi, "opens"],
+    [/\bziet\b/gi, "sees"],
     [/\bdroeg\b/gi, "wearing"],
+    [/\bloopt\b/gi, "walking"],
     [/\bliep\b/gi, "walking"],
     [/\bzocht(en)?\b/gi, "searching"],
     [/\bverborg\b/gi, "hiding"],

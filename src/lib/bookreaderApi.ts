@@ -36,6 +36,13 @@ export type ApiHealth = {
     timeoutMs?: number;
     deepTimeoutMs?: number;
   };
+  film?: {
+    provider: string;
+    model: string;
+    deepModel?: string;
+    timeoutMs?: number;
+    deepTimeoutMs?: number;
+  };
   deepseekApi?: {
     configured: boolean;
     baseUrl: string;
@@ -77,6 +84,61 @@ export type StoryGenerateResponse = {
   requestedWords: number;
   language?: string;
   wordCount: number;
+};
+
+export type FilmPlanScene = {
+  id: string;
+  title: string;
+  durationSeconds: number;
+  sourceRange: string;
+  purpose: string;
+  location: string;
+  timeOfDay: string;
+  characters: string[];
+  action: string;
+  dialogue: string[];
+  voiceOver: string;
+  camera: string;
+  visualPrompt: string;
+  audioPrompt: string;
+  transition: string;
+};
+
+export type FilmPlan = {
+  title: string;
+  logline: string;
+  targetMinutes: number;
+  totalDurationSeconds: number;
+  format: string;
+  visualStyle: string;
+  continuityBible: {
+    summary: string;
+    characters: string[];
+    locations: string[];
+    visualRules: string[];
+    audioRules: string[];
+  };
+  scenes: FilmPlanScene[];
+};
+
+export type FilmPlanRequest = {
+  title: string;
+  rawText: string;
+  targetMinutes: number;
+  sceneCount: number;
+  style?: string;
+  mode?: "fast" | "deep";
+  provider?: AiProvider;
+};
+
+export type FilmPlanResponse = {
+  ok: boolean;
+  provider: string;
+  model: string;
+  mode: "fast" | "deep";
+  fallbackUsed?: boolean;
+  warning?: string;
+  plan: FilmPlan;
 };
 
 export type TtsRequest = {
@@ -262,6 +324,13 @@ export async function analyzeContext(apiBase: string, payload: ContextAnalyzeReq
 
 export async function generateStory(apiBase: string, payload: StoryGenerateRequest): Promise<StoryGenerateResponse> {
   return requestJson<StoryGenerateResponse>(apiBase, "/api/story/generate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function planFilm(apiBase: string, payload: FilmPlanRequest): Promise<FilmPlanResponse> {
+  return requestJson<FilmPlanResponse>(apiBase, "/api/film/plan", {
     method: "POST",
     body: JSON.stringify(payload),
   });

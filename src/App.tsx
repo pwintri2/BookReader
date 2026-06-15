@@ -4,6 +4,7 @@ import {
   BookImage,
   Clipboard,
   Clock,
+  Film,
   FileText,
   FolderOpen,
   Image,
@@ -29,6 +30,7 @@ import {
   analyzeContext,
   cacheImage,
   ContextAnalysis,
+  FilmPlan,
   generateIllustration,
   generateStory,
   getHealth,
@@ -36,6 +38,7 @@ import {
   listProjectFiles,
   mediaUrl,
   openProjectFile,
+  planFilm,
   ProjectFileSummary,
   saveDeepSeekApiKey,
   synthesizeSpeech,
@@ -216,6 +219,12 @@ export function App() {
   const [referenceStatus, setReferenceStatus] = useState("geen referentie");
   const [storyBusy, setStoryBusy] = useState(false);
   const [storyStatus, setStoryStatus] = useState("DeepSeek chatmodel schrijft betere verhalen dan R1");
+  const [filmTargetMinutes, setFilmTargetMinutes] = useState(7);
+  const [filmSceneCount, setFilmSceneCount] = useState(12);
+  const [filmMode, setFilmMode] = useState<"fast" | "deep">("deep");
+  const [filmPlan, setFilmPlan] = useState<FilmPlan | null>(null);
+  const [filmBusy, setFilmBusy] = useState(false);
+  const [filmStatus, setFilmStatus] = useState("klaar voor adaptatie");
   const [assetStorageStatus, setAssetStorageStatus] = useState("beeldenmap: /home/pwintri2/BookReader/out/bookreader/images");
   const [projectBusy, setProjectBusy] = useState(false);
   const [savedStories, setSavedStories] = useState<SavedStoryEntry[]>([]);
@@ -311,6 +320,8 @@ export function App() {
     setCharacterPortraits([]);
     setContextAnalysis(null);
     setContextStatus("nog niet geanalyseerd");
+    setFilmPlan(null);
+    setFilmStatus("klaar voor adaptatie");
     setBookCover({ prompt: buildCoverPrompt(title || "Nieuw document", result.chapters, illustrationStyleId) });
     setCoverStatus("klaar voor cover");
     setNotice(result.stats.limited ? `Beperkt tot ${WORD_LIMIT_LABEL} woorden; origineel bevatte ${result.stats.originalWords}.` : "");
@@ -372,6 +383,8 @@ export function App() {
     setCharacterPortraits(portraitList.map((portrait) => ({ ...portrait, count: 0 })));
     setContextAnalysis((project.contextAnalysis as ContextAnalysis) || null);
     setContextStatus("project geladen");
+    setFilmPlan((project.filmPlan as FilmPlan) || null);
+    setFilmStatus(project.filmPlan ? "filmplan geladen" : "klaar voor adaptatie");
     setBookCover(project.bookCover || { prompt: buildCoverPrompt(project.title, result.chapters, "storybook") });
     setCoverStatus(project.bookCover?.imageUrl ? "cover geladen" : "klaar voor cover");
     stopSpeech();
@@ -441,6 +454,53 @@ export function App() {
       setNotice(message);
     } finally {
       setStoryBusy(false);
+    }
+  }
+
+  async function createFilmPlan() {
+    if (!rawText.trim()) {
+      setNotice("Geen verhaaltekst om te verfilmen.");
+      return;
+    }
+    setFilmBusy(true);
+    const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
+    setFilmStatus(`${providerLabel} maakt een scene breakdown...`);
+    setNotice("");
+    try {
+      const response = await planFilm(apiBase, {
+        title: documentTitle,
+        rawText,
+        targetMinutes: filmTargetMinutes,
+        sceneCount: filmSceneCount,
+        style: illustrationStyleId,
+        mode: filmMode,
+        provider: aiProvider,
+      });
+      setFilmPlan(response.plan);
+      const responseProvider =
+        response.provider === "deepseek-api" ? "API" : response.provider === "ollama" ? "lokaal" : "fallback";
+      const fallbackNote = response.fallbackUsed ? " + lokale fallback" : "";
+      setFilmStatus(
+        `${responseProvider} ${response.model} (${response.mode})${fallbackNote}: ${response.plan.scenes.length} scènes, ${formatDuration(
+          response.plan.totalDurationSeconds,
+        )}`,
+      );
+      setNotice(response.warning || `Filmplan klaar: ${response.plan.title}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Filmplan kon niet worden gemaakt.";
+      setFilmStatus(message);
+      setNotice(message);
+    } finally {
+      setFilmBusy(false);
+    }
+  }
+
+  async function copyFilmPrompt(prompt: string) {
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setNotice("Videoprompt gekopieerd.");
+    } catch {
+      setNotice("Kopiëren is niet gelukt.");
     }
   }
 
@@ -837,6 +897,7 @@ export function App() {
         characterPortraits: savedPortraits,
         bookCover: savedCover,
         contextAnalysis,
+        filmPlan,
       } satisfies BookProject;
       downloadBookProject(project);
       saveStoryToLibrary(libraryProject);
@@ -886,6 +947,7 @@ export function App() {
       })),
       bookCover,
       contextAnalysis,
+      filmPlan,
     };
   }
 
@@ -1155,6 +1217,87 @@ export function App() {
             <span>{storyBusy ? "Schrijft..." : "Maak verhaal"}</span>
           </button>
           <p className="voice-style-note">{storyStatus}</p>
+        </section>
+
+        <section className="tool-panel film-panel">
+          <div className="panel-title">
+            <Film size={17} />
+            <span>Filmstudio</span>
+          </div>
+          <div className="button-row">
+            <label className="field compact-field">
+              <span>Lengte</span>
+              <select value={filmTargetMinutes} onChange={(event) => setFilmTargetMinutes(Number(event.target.value))}>
+                {[5, 7, 10].map((minutes) => (
+                  <option value={minutes} key={minutes}>
+                    {minutes} min
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field compact-field">
+              <span>Scènes</span>
+              <select value={filmSceneCount} onChange={(event) => setFilmSceneCount(Number(event.target.value))}>
+                {[8, 10, 12, 16, 20, 24].map((count) => (
+                  <option value={count} key={count}>
+                    {count}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field compact-field">
+              <span>Model</span>
+              <select value={filmMode} onChange={(event) => setFilmMode(event.target.value as "fast" | "deep")}>
+                <option value="fast">{aiProvider === "api" ? "Snel API" : "Snel lokaal"}</option>
+                <option value="deep">{aiProvider === "api" ? "Diep API" : "Diep lokaal"}</option>
+              </select>
+            </label>
+          </div>
+          <button type="button" onClick={() => void createFilmPlan()} disabled={filmBusy || !rawText.trim()}>
+            {filmBusy ? <Loader2 size={16} /> : <Film size={16} />}
+            <span>{filmBusy ? "Regisseert..." : "Maak filmplan"}</span>
+          </button>
+          <p className="voice-style-note">{filmStatus}</p>
+          {filmPlan ? (
+            <div className="film-plan">
+              <div className="film-plan-summary">
+                <strong>{filmPlan.title}</strong>
+                <span>
+                  {formatDuration(filmPlan.totalDurationSeconds)} · {filmPlan.scenes.length} scènes
+                </span>
+                <p>{filmPlan.logline}</p>
+              </div>
+              {filmPlan.continuityBible?.summary ? (
+                <div className="context-brief">
+                  <p>{filmPlan.continuityBible.summary}</p>
+                </div>
+              ) : null}
+              <div className="film-scene-list">
+                {filmPlan.scenes.map((scene, index) => (
+                  <article className="film-scene-card" key={scene.id || index}>
+                    <header>
+                      <span>{index + 1}</span>
+                      <div>
+                        <strong>{scene.title}</strong>
+                        <small>
+                          {formatDuration(scene.durationSeconds)} · {scene.location || "locatie onbekend"}
+                        </small>
+                      </div>
+                    </header>
+                    <p>{scene.action}</p>
+                    {scene.voiceOver ? <small>Voice-over: {scene.voiceOver}</small> : null}
+                    {scene.camera ? <small>Camera: {scene.camera}</small> : null}
+                    {scene.visualPrompt ? (
+                      <button type="button" className="quiet" onClick={() => void copyFilmPrompt(scene.visualPrompt)}>
+                        <Clipboard size={15} />
+                        <span>Kopieer videoprompt</span>
+                      </button>
+                    ) : null}
+                  </article>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </section>
 
         <section className="tool-panel">
@@ -1583,6 +1726,7 @@ function lightweightProject(project: BookProject, savedAt: string): BookProject 
         }
       : undefined,
     contextAnalysis: project.contextAnalysis,
+    filmPlan: project.filmPlan,
   };
 }
 
@@ -1626,6 +1770,13 @@ function formatSavedAt(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function formatDuration(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.round(seconds || 0));
+  const minutes = Math.floor(safeSeconds / 60);
+  const rest = safeSeconds % 60;
+  return `${minutes}:${String(rest).padStart(2, "0")}`;
 }
 
 function delay(ms: number): Promise<void> {

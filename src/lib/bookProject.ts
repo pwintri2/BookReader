@@ -29,6 +29,7 @@ export type BookProject = {
   characterPortraits: SavedCharacterPortrait[];
   bookCover?: SavedBookCover;
   contextAnalysis?: unknown;
+  filmPlan?: unknown;
 };
 
 export function isBookProject(value: unknown): value is BookProject {
