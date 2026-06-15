@@ -1,3 +1,5 @@
+import type { BookProject } from "./bookProject";
+
 export type ApiHealth = {
   ok: boolean;
   tts?: {
@@ -59,6 +61,7 @@ export type StoryGenerateRequest = {
   language?: string;
   mode?: "fast" | "deep";
   provider?: AiProvider;
+  narrativePreset?: "balanced" | "rich_intro";
   referenceTitle?: string;
   referenceText?: string;
 };
@@ -185,6 +188,30 @@ export type DeepSeekKeySaveResponse = {
   message?: string;
 };
 
+export type ProjectFileSummary = {
+  id: string;
+  title: string;
+  savedAt: string;
+  wordCount: number;
+  chapterCount: number;
+  preview: string;
+  fileName: string;
+  filePath: string;
+};
+
+export type ProjectFileListResponse = {
+  ok: boolean;
+  scannedDirs: string[];
+  projects: ProjectFileSummary[];
+};
+
+export type ProjectFileOpenResponse = {
+  ok: boolean;
+  fileName: string;
+  filePath: string;
+  project: BookProject;
+};
+
 export function normalizeApiBase(value: string): string {
   return value.trim().replace(/\/+$/, "");
 }
@@ -198,6 +225,14 @@ export function mediaUrl(apiBase: string, path: string): string {
 
 export async function getHealth(apiBase: string): Promise<ApiHealth> {
   return requestJson<ApiHealth>(apiBase, "/api/health");
+}
+
+export async function listProjectFiles(apiBase: string): Promise<ProjectFileListResponse> {
+  return requestJson<ProjectFileListResponse>(apiBase, "/api/projects/list");
+}
+
+export async function openProjectFile(apiBase: string, id: string): Promise<ProjectFileOpenResponse> {
+  return requestJson<ProjectFileOpenResponse>(apiBase, `/api/projects/open/${encodeURIComponent(id)}`);
 }
 
 export async function synthesizeSpeech(apiBase: string, payload: TtsRequest): Promise<TtsResponse> {
@@ -248,13 +283,24 @@ export async function saveDeepSeekApiKey(apiBase: string, apiKey: string, clear 
 
 async function requestJson<T>(apiBase: string, path: string, init: RequestInit = {}): Promise<T> {
   const base = normalizeApiBase(apiBase);
-  const response = await fetch(`${base}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init.headers || {}),
-    },
-  });
+  if (!base) {
+    throw new Error("Serverlaag niet ingesteld. Gebruik de BookReader launcher of vul de API-basis in, bijvoorbeeld http://127.0.0.1:1433.");
+  }
+
+  const url = `${base}${path}`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(init.headers || {}),
+      },
+    });
+  } catch (error) {
+    const details = error instanceof Error && error.message ? ` Details: ${error.message}` : "";
+    throw new Error(`Serverlaag niet bereikbaar via ${base}. Controleer of de BookReader API draait.${details}`);
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const message = typeof payload.message === "string" ? payload.message : `API request failed: HTTP ${response.status}`;

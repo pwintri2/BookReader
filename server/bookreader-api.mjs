@@ -1,6 +1,7 @@
-import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, extname, join, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
@@ -14,6 +15,7 @@ const PORT = Number(process.env.BOOKREADER_API_PORT || 1433);
 const OUTPUT_DIR = resolve(process.env.BOOKREADER_OUTPUT_DIR || join(PROJECT_ROOT, "out/bookreader"));
 const AUDIO_DIR = join(OUTPUT_DIR, "audio");
 const IMAGES_DIR = join(OUTPUT_DIR, "images");
+const PROJECTS_DIR = resolve(process.env.BOOKREADER_PROJECTS_DIR || join(OUTPUT_DIR, "projects"));
 const VOICES_DIR = resolve(process.env.BOOKREADER_PIPER_VOICES_DIR || join(OUTPUT_DIR, "voices"));
 const PIPER_BIN = process.env.BOOKREADER_PIPER_BIN || autoPiperBinary();
 const PIPER_MODEL = process.env.BOOKREADER_PIPER_MODEL || "";
@@ -35,6 +37,7 @@ const CONTEXT_TIMEOUT_MS = Number(process.env.BOOKREADER_CONTEXT_TIMEOUT_MS || 3
 const DEEP_CONTEXT_TIMEOUT_MS = Number(process.env.BOOKREADER_DEEP_CONTEXT_TIMEOUT_MS || 120000);
 const STORY_TIMEOUT_MS = Number(process.env.BOOKREADER_STORY_TIMEOUT_MS || 180000);
 const DEEP_STORY_TIMEOUT_MS = Number(process.env.BOOKREADER_DEEP_STORY_TIMEOUT_MS || 360000);
+const PROJECT_FILE_MAX_BYTES = Number(process.env.BOOKREADER_PROJECT_FILE_MAX_BYTES || 50 * 1024 * 1024);
 
 const NAME_FALSE_POSITIVES = new Set([
   "a",
@@ -263,6 +266,7 @@ for (const token of [
 
 mkdirSync(AUDIO_DIR, { recursive: true });
 mkdirSync(IMAGES_DIR, { recursive: true });
+mkdirSync(PROJECTS_DIR, { recursive: true });
 mkdirSync(VOICES_DIR, { recursive: true });
 
 const server = createServer(async (req, res) => {
@@ -278,6 +282,16 @@ const server = createServer(async (req, res) => {
   try {
     if (req.method === "GET" && url.pathname === "/api/health") {
       await sendJson(res, 200, healthPayload());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/projects/list") {
+      await handleProjectList(res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/api/projects/open/")) {
+      await handleProjectOpen(url, res);
       return;
     }
 
@@ -391,6 +405,187 @@ function healthPayload() {
       imageFiles: safeImageCount(),
     },
   };
+}
+
+async function handleProjectList(res) {
+  const scannedDirs = projectSearchDirs();
+  const projects = [];
+  const seen = new Set();
+
+  for (const filePath of collectProjectFiles(scannedDirs)) {
+    if (seen.has(filePath)) continue;
+    seen.add(filePath);
+    const record = readBookProjectFile(filePath);
+    if (!record) continue;
+    projects.push(projectSummary(record.project, filePath, record.stat));
+  }
+
+  projects.sort((a, b) => Date.parse(b.savedAt) - Date.parse(a.savedAt) || a.title.localeCompare(b.title));
+  await sendJson(res, 200, { ok: true, scannedDirs, projects });
+}
+
+async function handleProjectOpen(url, res) {
+  const id = decodeURIComponent(url.pathname.replace("/api/projects/open/", ""));
+  const filePath = decodeProjectPath(id);
+  if (!filePath || !isAllowedProjectPath(filePath)) {
+    await sendJson(res, 404, { ok: false, error: "project_not_found" });
+    return;
+  }
+
+  const record = readBookProjectFile(filePath);
+  if (!record) {
+    await sendJson(res, 404, { ok: false, error: "project_not_found" });
+    return;
+  }
+
+  await sendJson(res, 200, {
+    ok: true,
+    fileName: basename(filePath),
+    filePath,
+    project: record.project,
+  });
+}
+
+function projectSearchDirs() {
+  const configured = String(process.env.BOOKREADER_PROJECT_SCAN_DIRS || "")
+    .split(":")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return uniquePaths([
+    ...configured,
+    PROJECTS_DIR,
+    OUTPUT_DIR,
+    join(process.env.HOME || homedir(), "Downloads"),
+  ]).filter((dirPath) => existsSync(dirPath));
+}
+
+function uniquePaths(paths) {
+  const seen = new Set();
+  const output = [];
+  for (const item of paths) {
+    const path = resolve(item);
+    if (seen.has(path)) continue;
+    seen.add(path);
+    output.push(path);
+  }
+  return output;
+}
+
+function collectProjectFiles(searchDirs) {
+  const files = [];
+  for (const dirPath of searchDirs) {
+    collectProjectFilesInDir(dirPath, files, 0);
+    if (files.length >= 250) break;
+  }
+  return files.slice(0, 250);
+}
+
+function collectProjectFilesInDir(dirPath, files, depth) {
+  if (files.length >= 250 || depth > 2) return;
+  let entries;
+  try {
+    entries = readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (files.length >= 250 || entry.name.startsWith(".")) continue;
+    const filePath = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      collectProjectFilesInDir(filePath, files, depth + 1);
+      continue;
+    }
+    if (entry.isFile() && isBookReaderProjectFileName(entry.name)) {
+      files.push(resolve(filePath));
+    }
+  }
+}
+
+function isBookReaderProjectFileName(fileName) {
+  return /\.bookreader(?:\s*\(\d+\))?\.json$/i.test(fileName) || /\.bookreader\.json$/i.test(fileName);
+}
+
+function readBookProjectFile(filePath) {
+  try {
+    const stat = statSync(filePath);
+    if (!stat.isFile() || stat.size > PROJECT_FILE_MAX_BYTES) return null;
+    const payload = JSON.parse(readFileSync(filePath, "utf8"));
+    if (!isBookReaderProject(payload)) return null;
+    return { project: normalizeBookReaderProject(payload, stat.mtime.toISOString()), stat };
+  } catch {
+    return null;
+  }
+}
+
+function isBookReaderProject(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      value.schema === "bookreader.project.v1" &&
+      typeof value.title === "string" &&
+      typeof value.rawText === "string",
+  );
+}
+
+function normalizeBookReaderProject(project, fallbackSavedAt) {
+  return {
+    schema: "bookreader.project.v1",
+    savedAt: typeof project.savedAt === "string" ? project.savedAt : fallbackSavedAt,
+    title: String(project.title || "Nieuw verhaal"),
+    rawText: String(project.rawText || ""),
+    illustrationStyleId: String(project.illustrationStyleId || "storybook"),
+    chapterIllustrations: Array.isArray(project.chapterIllustrations) ? project.chapterIllustrations : [],
+    characterPortraits: Array.isArray(project.characterPortraits) ? project.characterPortraits : [],
+    bookCover: project.bookCover && typeof project.bookCover === "object" ? project.bookCover : undefined,
+    contextAnalysis: project.contextAnalysis,
+  };
+}
+
+function projectSummary(project, filePath, stat) {
+  return {
+    id: encodeProjectPath(filePath),
+    title: project.title || basename(filePath),
+    savedAt: project.savedAt || stat.mtime.toISOString(),
+    wordCount: countWords(project.rawText),
+    chapterCount: estimateChapterCount(project.rawText),
+    preview: projectPreview(project.rawText),
+    fileName: basename(filePath),
+    filePath,
+  };
+}
+
+function projectPreview(rawText) {
+  return truncate(String(rawText || "").replace(/^#{1,3}\s+.+$/gm, " "), 150) || "Leeg verhaal";
+}
+
+function estimateChapterCount(rawText) {
+  const text = String(rawText || "");
+  const pageMarkers = (text.match(/^##\s+/gm) || []).length;
+  if (pageMarkers) return pageMarkers;
+  const headings = (text.match(/^(?:hoofdstuk|chapter|pagina|page)\s+\d+/gim) || []).length;
+  return headings || (text.trim() ? 1 : 0);
+}
+
+function encodeProjectPath(filePath) {
+  return Buffer.from(resolve(filePath), "utf8").toString("base64url");
+}
+
+function decodeProjectPath(id) {
+  try {
+    return resolve(Buffer.from(String(id || ""), "base64url").toString("utf8"));
+  } catch {
+    return "";
+  }
+}
+
+function isAllowedProjectPath(filePath) {
+  const resolved = resolve(filePath);
+  if (!isBookReaderProjectFileName(basename(resolved))) return false;
+  return projectSearchDirs().some((dirPath) => {
+    const rel = relative(dirPath, resolved);
+    return rel && !rel.startsWith("..") && !rel.startsWith(sep);
+  });
 }
 
 async function handleContextAnalyze(req, res) {
@@ -574,11 +769,12 @@ async function handleStoryGenerate(req, res) {
   const prompt = String(body.prompt || "").trim();
   const mode = body.mode === "deep" ? "deep" : "fast";
   const provider = body.provider === "api" ? "api" : "local";
+  const narrativePreset = body.narrativePreset === "rich_intro" ? "rich_intro" : "balanced";
   const localModel = mode === "deep" ? DEEP_STORY_MODEL : STORY_MODEL;
   const model = provider === "api" ? DEEPSEEK_API_STORY_MODEL : localModel;
   const timeoutMs = mode === "deep" ? DEEP_STORY_TIMEOUT_MS : STORY_TIMEOUT_MS;
-  const pages = clampNumber(Number(body.pages || 4), 1, mode === "deep" ? 24 : 12);
-  const wordsPerPage = clampNumber(Number(body.wordsPerPage || 550), 180, 1000);
+  const pages = clampNumber(Number(body.pages || (narrativePreset === "rich_intro" ? 6 : 4)), narrativePreset === "rich_intro" ? 4 : 1, mode === "deep" ? 24 : 12);
+  const wordsPerPage = clampNumber(Number(body.wordsPerPage || (narrativePreset === "rich_intro" ? 750 : 550)), narrativePreset === "rich_intro" ? 650 : 180, 1000);
   const genre = String(body.genre || "avontuurlijk verhaal").slice(0, 160);
   const audience = String(body.audience || "algemeen publiek").slice(0, 160);
   const tone = String(body.tone || "beeldend, helder en menselijk").slice(0, 180);
@@ -605,6 +801,7 @@ async function handleStoryGenerate(req, res) {
     tone,
     language,
     pageLabel,
+    narrativePreset,
     referenceGuide,
     referenceText,
   });
@@ -1305,10 +1502,32 @@ function extractReferenceHistory(sentences, characterNames) {
     .map((sentence) => truncate(sentence, 260));
 }
 
-function buildStoryGenerationPrompt({ prompt, pages, wordsPerPage, targetWords, genre, audience, tone, language, pageLabel, referenceGuide, referenceText }) {
+function buildStoryGenerationPrompt({
+  prompt,
+  pages,
+  wordsPerPage,
+  targetWords,
+  genre,
+  audience,
+  tone,
+  language,
+  pageLabel,
+  narrativePreset,
+  referenceGuide,
+  referenceText,
+}) {
   const referenceBlock = referenceGuide
     ? `\nReference story bible:\n${referenceGuide}\n\nReference excerpt for continuity, character history and voice. Use it as background; do not copy passages verbatim unless the user explicitly asks for a rewrite:\n${truncate(referenceText, 9000)}\n`
     : "";
+  const richIntroRules =
+    narrativePreset === "rich_intro"
+      ? `\nDetail and introduction preset:
+- Use a spacious, detailed opening. The first page must mostly introduce the main character, ordinary world, relationships, sensory setting, inner wish, and subtle tension before the main incident fully begins.
+- Do not rush straight to the magic object, danger, reveal, quest, chase, or central conflict. Let the reader first understand where the character is, what they notice, what they want, and why this moment matters.
+- Add concrete sensory details, gestures, small routines, remembered details, environmental texture, and clear cause-and-effect in every page.
+- Prefer scenes with specific actions and observations over summary. Keep the extra detail relevant; do not pad with decorative lists.
+`
+      : "";
   return `You are BookReader's story writer.
 Write a complete multi-page story from the user's idea.
 
@@ -1326,6 +1545,7 @@ Output rules:
 - Genre, audience and tone may be UI hints written in another language. They must not override the required output language: ${language}.
 - Write with more concrete sensory detail, character memory, small actions, and cause-and-effect. Avoid vague summary paragraphs.
 - Minimize formulaic contrast sentences such as "het is niet X, maar Y", "niet alleen X maar ook Y", "it is not X but Y", and "not only X but also Y". Use direct description instead.
+${richIntroRules}
 
 Story quality rules:
 - Build a coherent beginning, middle and ending.

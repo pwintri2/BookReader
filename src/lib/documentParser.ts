@@ -8,7 +8,7 @@ export type ParsedDocument = {
 
 export async function parseFile(file: File): Promise<ParsedDocument> {
   const lowerName = file.name.toLowerCase();
-  if (lowerName.endsWith(".docx")) {
+  if (isDocxFile(file, lowerName)) {
     return {
       title: stripExtension(file.name),
       text: normalizeWhitespace(await parseDocx(file)),
@@ -27,6 +27,10 @@ export async function parseFile(file: File): Promise<ParsedDocument> {
     text: normalizeWhitespace(await file.text()),
     kind: "text",
   };
+}
+
+function isDocxFile(file: File, lowerName = file.name.toLowerCase()): boolean {
+  return lowerName.endsWith(".docx") || file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 }
 
 async function parseDocx(file: File): Promise<string> {

@@ -61,6 +61,12 @@ button.quiet {
   border-color: var(--line);
 }
 
+.preset-button.active {
+  color: #101214;
+  background: var(--accent-2);
+  border-color: rgba(241, 196, 109, 0.72);
+}
+
 .icon-button {
   width: 38px;
   padding: 0;
@@ -270,6 +276,61 @@ textarea:focus {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.saved-stories-panel {
+  align-content: start;
+}
+
+.saved-story-list {
+  display: grid;
+  gap: 8px;
+  max-height: 300px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.saved-story-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.file-story-item {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.saved-story-open {
+  display: grid;
+  justify-items: start;
+  min-height: 72px;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.saved-story-open strong,
+.saved-story-open small,
+.saved-story-open span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-story-open strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.saved-story-open small,
+.saved-story-open span {
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
+.saved-story-open span {
+  color: var(--muted);
 }
 
 .server-status {

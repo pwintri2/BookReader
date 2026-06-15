@@ -15,6 +15,7 @@ import {
   Search,
   Server,
   Save,
+  Sparkles,
   Square,
   Trash2,
   Upload,
@@ -32,7 +33,10 @@ import {
   generateStory,
   getHealth,
   getIllustrationStatus,
+  listProjectFiles,
   mediaUrl,
+  openProjectFile,
+  ProjectFileSummary,
   saveDeepSeekApiKey,
   synthesizeSpeech,
 } from "./lib/bookreaderApi";
@@ -60,8 +64,18 @@ type SpeechState = "idle" | "speaking" | "paused";
 type TtsProvider = "browser" | "server";
 type VoiceStyleId = "neutral" | "story" | "lively" | "calm";
 type StoryLanguage = "Auto" | "Nederlands" | "English" | "Deutsch" | "Français" | "Español";
+type StoryNarrativePreset = "balanced" | "rich_intro";
 type ChapterIllustrationMap = Record<string, SavedChapterIllustration>;
 type CharacterPortraitRecord = CharacterPortrait & { imageUrl?: string };
+type SavedStoryEntry = {
+  id: string;
+  title: string;
+  savedAt: string;
+  wordCount: number;
+  chapterCount: number;
+  preview: string;
+  project: BookProject;
+};
 
 type VoiceStyle = {
   id: VoiceStyleId;
@@ -74,6 +88,19 @@ type VoiceStyle = {
 
 const WORD_LIMIT_LABEL = MAX_WORDS.toLocaleString("nl-NL");
 const DEFAULT_API_BASE = defaultApiBase();
+const SAVED_STORIES_KEY = "bookreader.savedStories.v1";
+const MAX_SAVED_STORIES = 30;
+const DOCUMENT_ACCEPT = [
+  ".txt",
+  ".md",
+  ".docx",
+  ".pdf",
+  "text/plain",
+  "text/markdown",
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+].join(",");
+const PROJECT_ACCEPT = `${DOCUMENT_ACCEPT},.bookreader.json,application/json`;
 const DEFAULT_NEGATIVE_PROMPT = [
   "low quality",
   "blurry",
@@ -180,6 +207,7 @@ export function App() {
   const [storyWordsPerPage, setStoryWordsPerPage] = useState(550);
   const [storyLanguage, setStoryLanguage] = useState<StoryLanguage>("Auto");
   const [storyMode, setStoryMode] = useState<"fast" | "deep">("deep");
+  const [storyNarrativePreset, setStoryNarrativePreset] = useState<StoryNarrativePreset>("balanced");
   const [aiProvider, setAiProvider] = useState<AiProvider>("local");
   const [storyGenre, setStoryGenre] = useState("avontuurlijk mysterie");
   const [storyTone, setStoryTone] = useState("beeldend, warm en spannend");
@@ -190,6 +218,10 @@ export function App() {
   const [storyStatus, setStoryStatus] = useState("DeepSeek chatmodel schrijft betere verhalen dan R1");
   const [assetStorageStatus, setAssetStorageStatus] = useState("beeldenmap: /home/pwintri2/BookReader/out/bookreader/images");
   const [projectBusy, setProjectBusy] = useState(false);
+  const [savedStories, setSavedStories] = useState<SavedStoryEntry[]>([]);
+  const [projectFiles, setProjectFiles] = useState<ProjectFileSummary[]>([]);
+  const [projectScanBusy, setProjectScanBusy] = useState(false);
+  const [projectScanStatus, setProjectScanStatus] = useState("JSON-bestanden nog niet gescand");
   const [query, setQuery] = useState("");
   const [isParsing, setIsParsing] = useState(false);
   const [notice, setNotice] = useState("");
@@ -206,6 +238,10 @@ export function App() {
     if (!q) return chapters;
     return chapters.filter((chapter) => `${chapter.title} ${chapter.text}`.toLowerCase().includes(q));
   }, [chapters, query]);
+  const scannedStoryFiles = useMemo(() => {
+    const localKeys = new Set(savedStories.map((entry) => storyIdentityKey(entry.title, entry.savedAt)));
+    return projectFiles.filter((entry) => !localKeys.has(storyIdentityKey(entry.title, entry.savedAt)));
+  }, [projectFiles, savedStories]);
 
   const selectedVoice = voices.find((voice) => voice.voiceURI === voiceURI) || voices[0];
   const selectedVoiceStyle = VOICE_STYLES.find((style) => style.id === voiceStyleId) || VOICE_STYLES[0];
@@ -254,6 +290,14 @@ export function App() {
     void refreshApiHealth(false);
   }, []);
 
+  useEffect(() => {
+    setSavedStories(readSavedStories());
+  }, []);
+
+  useEffect(() => {
+    void refreshProjectFiles(false);
+  }, []);
+
   function processText(title: string, text: string) {
     const result = splitIntoChapters(text);
     setDocumentTitle(title || "Nieuw document");
@@ -283,6 +327,7 @@ export function App() {
           throw new Error("Dit is geen geldig BookReader-projectbestand.");
         }
         loadBookProject(payload);
+        saveStoryToLibrary(payload);
         setNotice(`${file.name} geopend met opgeslagen beelden.`);
         return;
       }
@@ -314,7 +359,9 @@ export function App() {
 
   function loadBookProject(project: BookProject) {
     const result = splitIntoChapters(project.rawText);
-    const chapterMap = Object.fromEntries(project.chapterIllustrations.map((item) => [item.chapterId, item]));
+    const chapterIllustrationList = Array.isArray(project.chapterIllustrations) ? project.chapterIllustrations : [];
+    const portraitList = Array.isArray(project.characterPortraits) ? project.characterPortraits : [];
+    const chapterMap = Object.fromEntries(chapterIllustrationList.map((item) => [item.chapterId, item]));
     setDocumentTitle(project.title || "Nieuw document");
     setRawText(project.rawText);
     setChapters(result.chapters);
@@ -322,7 +369,7 @@ export function App() {
     setSelectedChapterId(result.chapters[0]?.id || "");
     setIllustrationStyleId((project.illustrationStyleId as IllustrationStyleId) || "storybook");
     setChapterIllustrations(chapterMap);
-    setCharacterPortraits(project.characterPortraits.map((portrait) => ({ ...portrait, count: 0 })));
+    setCharacterPortraits(portraitList.map((portrait) => ({ ...portrait, count: 0 })));
     setContextAnalysis((project.contextAnalysis as ContextAnalysis) || null);
     setContextStatus("project geladen");
     setBookCover(project.bookCover || { prompt: buildCoverPrompt(project.title, result.chapters, "storybook") });
@@ -365,7 +412,8 @@ export function App() {
     }
     setStoryBusy(true);
     const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
-    setStoryStatus(storyMode === "deep" ? `${providerLabel} schrijft uitgebreid...` : `${providerLabel} schrijft kort...`);
+    const presetLabel = storyNarrativePreset === "rich_intro" ? " met veel detail en lange intro" : "";
+    setStoryStatus(storyMode === "deep" ? `${providerLabel} schrijft uitgebreid${presetLabel}...` : `${providerLabel} schrijft kort${presetLabel}...`);
     setNotice("");
     try {
       const response = await generateStory(apiBase, {
@@ -378,6 +426,7 @@ export function App() {
         language: storyLanguage,
         mode: storyMode,
         provider: aiProvider,
+        narrativePreset: storyNarrativePreset,
         referenceTitle,
         referenceText,
       });
@@ -393,6 +442,15 @@ export function App() {
     } finally {
       setStoryBusy(false);
     }
+  }
+
+  function applyRichIntroPreset() {
+    setStoryNarrativePreset("rich_intro");
+    setStoryMode("deep");
+    setStoryPages((current) => Math.max(current, 6));
+    setStoryWordsPerPage((current) => Math.max(current, 750));
+    setStoryTone("rijk gedetailleerd, langzaam opbouwend, zintuiglijk, met een lange introductie");
+    setNotice("Preset actief: veel details, rustige opbouw en een lange introductie.");
   }
 
   function applyVoiceStyle(nextStyleId: string) {
@@ -748,6 +806,8 @@ export function App() {
     setProjectBusy(true);
     setNotice("Projectbestand wordt gemaakt...");
     try {
+      const savedAt = new Date().toISOString();
+      const libraryProject = currentBookProject(savedAt);
       const savedChapterIllustrations = await Promise.all(
         Object.values(chapterIllustrations).map(async (item) => ({
           ...item,
@@ -767,9 +827,9 @@ export function App() {
         ...bookCover,
         imageUrl: bookCover.imageUrl ? await imageToDataUrl(bookCover.imageUrl) : undefined,
       };
-      downloadBookProject({
+      const project = {
         schema: "bookreader.project.v1",
-        savedAt: new Date().toISOString(),
+        savedAt,
         title: documentTitle,
         rawText,
         illustrationStyleId,
@@ -777,7 +837,9 @@ export function App() {
         characterPortraits: savedPortraits,
         bookCover: savedCover,
         contextAnalysis,
-      });
+      } satisfies BookProject;
+      downloadBookProject(project);
+      saveStoryToLibrary(libraryProject);
       setNotice("Project opgeslagen.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Project kon niet worden opgeslagen.");
@@ -807,6 +869,82 @@ export function App() {
     setNotice("");
   }
 
+  function currentBookProject(savedAt = new Date().toISOString()): BookProject {
+    return {
+      schema: "bookreader.project.v1",
+      savedAt,
+      title: documentTitle,
+      rawText,
+      illustrationStyleId,
+      chapterIllustrations: Object.values(chapterIllustrations),
+      characterPortraits: characterPortraits.map((portrait) => ({
+        id: portrait.id,
+        name: portrait.name,
+        description: portrait.description,
+        prompt: portrait.prompt,
+        imageUrl: portrait.imageUrl,
+      })),
+      bookCover,
+      contextAnalysis,
+    };
+  }
+
+  function saveStoryToLibrary(project: BookProject) {
+    const entry = savedStoryEntryFromProject(project);
+    const nextStories = [entry, ...savedStories.filter((item) => item.id !== entry.id)].slice(0, MAX_SAVED_STORIES);
+    try {
+      writeSavedStories(nextStories);
+      setSavedStories(nextStories);
+    } catch {
+      setNotice("Projectbestand opgeslagen, maar de lokale verhalenlijst is vol.");
+    }
+  }
+
+  function openSavedStory(entry: SavedStoryEntry) {
+    loadBookProject(entry.project);
+    setNotice(`${entry.title} uit lokale bibliotheek geopend.`);
+  }
+
+  function deleteSavedStory(entryId: string) {
+    const nextStories = savedStories.filter((entry) => entry.id !== entryId);
+    writeSavedStories(nextStories);
+    setSavedStories(nextStories);
+  }
+
+  async function refreshProjectFiles(showNotice = true) {
+    setProjectScanBusy(true);
+    try {
+      const response = await listProjectFiles(apiBase);
+      setProjectFiles(response.projects);
+      const message = `${response.projects.length} JSON-verhalen gevonden`;
+      setProjectScanStatus(message);
+      if (showNotice) setNotice(message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "JSON-verhalen konden niet worden gescand.";
+      setProjectScanStatus("scan niet beschikbaar");
+      if (showNotice) setNotice(message);
+    } finally {
+      setProjectScanBusy(false);
+    }
+  }
+
+  async function openProjectFileEntry(entry: ProjectFileSummary) {
+    setProjectBusy(true);
+    try {
+      const response = await openProjectFile(apiBase, entry.id);
+      if (!isBookProject(response.project)) {
+        throw new Error("Dit JSON-bestand is geen geldig BookReader-project.");
+      }
+      loadBookProject(response.project);
+      saveStoryToLibrary(response.project);
+      setNotice(`${entry.fileName} geopend uit JSON-bestand.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "JSON-verhaal kon niet worden geopend.");
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <aside className="reader-sidebar">
@@ -817,6 +955,49 @@ export function App() {
             <span>{stats.totalWords.toLocaleString("nl-NL")} woorden</span>
           </div>
         </div>
+
+        <section className="tool-panel saved-stories-panel">
+          <div className="panel-title">
+            <Clock size={17} />
+            <span>Verhalen</span>
+          </div>
+          <button type="button" className="quiet" onClick={() => void refreshProjectFiles(true)} disabled={projectScanBusy}>
+            {projectScanBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
+            <span>Scan JSON</span>
+          </button>
+          {savedStories.length || scannedStoryFiles.length ? (
+            <div className="saved-story-list">
+              {savedStories.map((entry) => (
+                <article className="saved-story-item" key={entry.id}>
+                  <button type="button" className="saved-story-open quiet" onClick={() => openSavedStory(entry)} title={entry.title}>
+                    <strong>{entry.title}</strong>
+                    <small>
+                      {formatSavedAt(entry.savedAt)} · {entry.wordCount.toLocaleString("nl-NL")} woorden · {entry.chapterCount} hoofdstukken
+                    </small>
+                    <span>{entry.preview}</span>
+                  </button>
+                  <button type="button" className="quiet icon-button" onClick={() => deleteSavedStory(entry.id)} title="Verwijder uit lijst">
+                    <Trash2 size={15} />
+                  </button>
+                </article>
+              ))}
+              {scannedStoryFiles.map((entry) => (
+                <article className="saved-story-item file-story-item" key={entry.id}>
+                  <button type="button" className="saved-story-open quiet" onClick={() => void openProjectFileEntry(entry)} title={entry.filePath}>
+                    <strong>{entry.title}</strong>
+                    <small>
+                      JSON · {formatSavedAt(entry.savedAt)} · {entry.wordCount.toLocaleString("nl-NL")} woorden · {entry.chapterCount} hoofdstukken
+                    </small>
+                    <span>{entry.fileName}</span>
+                  </button>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="voice-style-note">Nog geen opgeslagen verhalen. {projectScanStatus}</p>
+          )}
+          {savedStories.length || scannedStoryFiles.length ? <p className="voice-style-note">{projectScanStatus}</p> : null}
+        </section>
 
         <section className="tool-panel">
           <label className="field">
@@ -839,7 +1020,7 @@ export function App() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".txt,.md,.docx,.pdf,.bookreader.json,text/plain,application/pdf,application/json"
+            accept={PROJECT_ACCEPT}
             onChange={handleFileInput}
             hidden
           />
@@ -886,6 +1067,16 @@ export function App() {
             <span>Verteltoon</span>
             <input value={storyTone} onChange={(event) => setStoryTone(event.target.value)} />
           </label>
+          <button
+            type="button"
+            className={`quiet preset-button ${storyNarrativePreset === "rich_intro" ? "active" : ""}`}
+            onClick={applyRichIntroPreset}
+            aria-pressed={storyNarrativePreset === "rich_intro"}
+            title="Zet de verhaalinstellingen op meer detail, meer woorden en een langere introductie"
+          >
+            <Sparkles size={16} />
+            <span>Veel details + lange intro</span>
+          </button>
           <div className="button-row">
             <button type="button" className="quiet" onClick={() => referenceInputRef.current?.click()}>
               <FolderOpen size={16} />
@@ -908,7 +1099,7 @@ export function App() {
           <input
             ref={referenceInputRef}
             type="file"
-            accept=".txt,.md,.docx,.pdf,text/plain,application/pdf"
+            accept={DOCUMENT_ACCEPT}
             onChange={handleReferenceInput}
             hidden
           />
@@ -1319,6 +1510,122 @@ function defaultApiBase(): string {
     return "http://127.0.0.1:1433";
   }
   return "";
+}
+
+function readSavedStories(): SavedStoryEntry[] {
+  try {
+    const payload = JSON.parse(window.localStorage.getItem(SAVED_STORIES_KEY) || "[]");
+    if (!Array.isArray(payload)) return [];
+    return payload
+      .filter(isSavedStoryEntry)
+      .sort((a, b) => Date.parse(b.savedAt) - Date.parse(a.savedAt))
+      .slice(0, MAX_SAVED_STORIES);
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedStories(entries: SavedStoryEntry[]): void {
+  window.localStorage.setItem(SAVED_STORIES_KEY, JSON.stringify(entries.slice(0, MAX_SAVED_STORIES)));
+}
+
+function isSavedStoryEntry(value: unknown): value is SavedStoryEntry {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === "string" &&
+    typeof record.title === "string" &&
+    typeof record.savedAt === "string" &&
+    typeof record.wordCount === "number" &&
+    typeof record.chapterCount === "number" &&
+    typeof record.preview === "string" &&
+    isBookProject(record.project)
+  );
+}
+
+function savedStoryEntryFromProject(project: BookProject): SavedStoryEntry {
+  const rawText = String(project.rawText || "");
+  const chapters = splitIntoChapters(rawText).chapters;
+  const savedAt = project.savedAt || new Date().toISOString();
+  const title = project.title || "Nieuw verhaal";
+  return {
+    id: storyEntryId(title, savedAt),
+    title,
+    savedAt,
+    wordCount: countStoryWords(rawText),
+    chapterCount: chapters.length,
+    preview: storyPreview(rawText),
+    project: lightweightProject(project, savedAt),
+  };
+}
+
+function lightweightProject(project: BookProject, savedAt: string): BookProject {
+  const chapterIllustrations = Array.isArray(project.chapterIllustrations) ? project.chapterIllustrations : [];
+  const characterPortraits = Array.isArray(project.characterPortraits) ? project.characterPortraits : [];
+  return {
+    schema: "bookreader.project.v1",
+    savedAt,
+    title: project.title || "Nieuw verhaal",
+    rawText: String(project.rawText || ""),
+    illustrationStyleId: project.illustrationStyleId || "storybook",
+    chapterIllustrations: chapterIllustrations.map((item) => ({
+      ...item,
+      imageUrl: compactImageUrl(item.imageUrl),
+    })),
+    characterPortraits: characterPortraits.map((portrait) => ({
+      ...portrait,
+      imageUrl: compactImageUrl(portrait.imageUrl),
+    })),
+    bookCover: project.bookCover
+      ? {
+          ...project.bookCover,
+          imageUrl: compactImageUrl(project.bookCover.imageUrl),
+        }
+      : undefined,
+    contextAnalysis: project.contextAnalysis,
+  };
+}
+
+function compactImageUrl(value?: string): string | undefined {
+  if (!value || value.startsWith("data:")) return undefined;
+  return value;
+}
+
+function storyEntryId(title: string, savedAt: string): string {
+  const slug = title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return `${slug || "verhaal"}-${savedAt.replace(/[^0-9]/g, "").slice(0, 14)}`;
+}
+
+function storyIdentityKey(title: string, savedAt: string): string {
+  return `${title.trim().toLowerCase()}|${savedAt}`;
+}
+
+function storyPreview(text: string): string {
+  const clean = String(text || "")
+    .replace(/^#{1,3}\s+.+$/gm, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clean.slice(0, 150) || "Leeg verhaal";
+}
+
+function countStoryWords(text: string): number {
+  return String(text || "").match(/\S+/g)?.length || 0;
+}
+
+function formatSavedAt(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "onbekende datum";
+  return new Intl.DateTimeFormat("nl-NL", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function delay(ms: number): Promise<void> {

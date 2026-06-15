@@ -1,19 +1,23 @@
 # BookReader
 
-BookReader is a standalone Tauri/PWA reading and story-building app. It imports long text, DOCX and PDF files, splits them into readable chapters, reads them aloud, generates stories from prompts, and creates chapter illustrations, character portraits and book covers through a local ComfyUI workflow.
+BookReader is a local-first reading desk, story machine and tiny illustration studio in one app.
 
-The app is built to stay useful offline first: browser speech and document parsing work locally, while the optional server layer adds Piper TTS, Ollama/DeepSeek analysis, DeepSeek API support and ComfyUI image generation.
+Drop in a long text, DOCX, PDF or saved BookReader project, and it turns the material into readable chapters. From there you can read aloud, generate new stories, keep a local shelf of saved projects, reuse reference documents as story continuity, and create illustrations through a local ComfyUI workflow.
 
-## Highlights
+It is built for the good kind of quiet: your text stays local by default, generated files live in inspectable folders, and optional AI services are wired through a small companion API you control.
 
-- Import `TXT`, `MD`, `DOCX`, `PDF` and `.bookreader.json` project files.
-- Split documents up to 500,000 words into chapters.
-- Read chapters aloud with browser voices or server-side Piper voices.
-- Generate multi-page stories from prompts in `Auto`, Dutch, English, German, French or Spanish.
-- Add a separate reference file so the writer can reuse character history, relationships and continuity cues.
-- Generate chapter illustrations, character portraits and book covers with ComfyUI.
-- Save BookReader projects with text, prompts and embedded generated images.
-- Store generated images locally under `out/bookreader/images/`.
+## What It Does
+
+- Imports `TXT`, `MD`, `DOCX`, `PDF` and `.bookreader.json` project files.
+- Splits documents up to 500,000 words into navigable chapters.
+- Reads chapters aloud with browser voices or server-side Piper voices.
+- Generates multi-page stories from prompts in `Auto`, Dutch, English, German, French or Spanish.
+- Supports a **Veel details + lange intro** preset for slower openings with richer sensory detail.
+- Accepts separate reference files, including DOCX, so characters, history and continuity can carry into new stories.
+- Shows saved stories at a glance in the **Verhalen** panel.
+- Scans existing `.bookreader.json` files from local project and Downloads folders.
+- Generates chapter illustrations, character portraits and book covers with ComfyUI.
+- Saves complete BookReader projects with text, prompts and embedded generated images.
 
 ## Quick Start
 
@@ -37,7 +41,9 @@ npm run tauri -- dev
 
 ## Desktop Launcher
 
-The repository includes `scripts/bookreader-launch.sh` for local desktop use. It starts the BookReader API when needed and then opens the Tauri app. A Linux `.desktop` entry can point to this script:
+The repository includes `scripts/bookreader-launch.sh` for local desktop use. It starts or refreshes the BookReader API when needed and then opens the Tauri app.
+
+A Linux `.desktop` entry can point to:
 
 ```text
 Exec=/home/pwintri2/BookReader/scripts/bookreader-launch.sh
@@ -55,6 +61,7 @@ The launcher writes API logs to:
 ```bash
 npm test
 npm run build
+npm run tauri -- build
 cargo check --manifest-path src-tauri/Cargo.toml
 scripts/install_piper_voices.sh
 npm run dev:mobile
@@ -70,14 +77,6 @@ http://127.0.0.1:1433
 
 The server reads `.env` and `.env.local` from the project root, in addition to shell environment variables. Secrets belong in `.env.local`, which is ignored by git.
 
-## Configuration
-
-Copy `.env.example` to `.env.local` when you want local configuration:
-
-```bash
-cp .env.example .env.local
-```
-
 Common settings:
 
 ```env
@@ -92,6 +91,7 @@ BOOKREADER_STORY_MODEL=deepseek-llm:7b-chat
 BOOKREADER_DEEP_STORY_MODEL=deepseek-llm:7b-chat
 
 BOOKREADER_COMFY_URL=http://127.0.0.1:8188
+BOOKREADER_PROJECT_SCAN_DIRS=/some/folder:/another/folder
 ```
 
 Optional DeepSeek API key:
@@ -110,17 +110,33 @@ You can also paste the key in the app under `Serverlaag -> DeepSeek API key`. Th
 The story panel can create a complete multi-page story from a prompt. It supports:
 
 - page count and words-per-page controls;
-- `Auto` language detection, so an English prompt produces an English story unless overridden;
+- automatic language detection;
 - local Ollama models or the DeepSeek API;
-- a reference document for character history and continuity;
+- a DOCX/TXT/MD/PDF reference document for character history and continuity;
 - concrete chapter titles such as `Page 1 - The Door Under the Bridge`;
 - quality checks for unfinished output, excessive repetition and formulaic contrast phrasing.
 
 Reference files are read separately from the active book. They are used as a compact story bible for names, relationships, backstory and recurring motifs.
 
+## Saved Stories
+
+Use `Opslaan` to download a `.bookreader.json` project and add it to the local story shelf.
+
+The **Verhalen** panel shows saved stories with title, date, word count, chapter count and preview. `Scan JSON` looks for existing BookReader project files in:
+
+```text
+out/bookreader/projects
+out/bookreader
+~/Downloads
+```
+
+Set `BOOKREADER_PROJECT_SCAN_DIRS` to add more scan roots.
+
 ## Illustrations
 
-ComfyUI generation works when `BOOKREADER_COMFY_URL` points to a running ComfyUI server and `BOOKREADER_COMFY_WORKFLOW` points to an API workflow JSON. The default workflow lives at:
+ComfyUI generation works when `BOOKREADER_COMFY_URL` points to a running ComfyUI server and `BOOKREADER_COMFY_WORKFLOW` points to an API workflow JSON.
+
+The default workflow lives at:
 
 ```text
 server/comfy/bookreader-workflow-api.json
@@ -138,8 +154,6 @@ They are served back through:
 /api/media/images/...
 ```
 
-The UI shows the last saved image path in the illustration panel.
-
 ## Piper Voices
 
 Install the default Piper voices with:
@@ -150,9 +164,9 @@ scripts/install_piper_voices.sh
 
 The script creates `.venv_piper/` and downloads Dutch `ronnie`/`alex` plus English `lessac` voice models into `out/bookreader/voices/`.
 
-## BookReader Projects
+## Project Files
 
-Use `Opslaan` to download a `.bookreader.json` project. The project file includes:
+A `.bookreader.json` project can include:
 
 - raw story text;
 - chapter illustration prompts;
