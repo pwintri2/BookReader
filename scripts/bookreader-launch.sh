@@ -28,7 +28,7 @@ finally:
 PY
 }
 
-api_supports_projects() {
+api_supports_current_features() {
   python3 - "$API_HOST" "$API_PORT" <<'PY'
 import http.client
 import json
@@ -40,7 +40,15 @@ try:
     conn = http.client.HTTPConnection(host, port, timeout=1.0)
     conn.request("GET", "/api/projects/list")
     response = conn.getresponse()
-    payload = json.loads(response.read().decode("utf-8") or "{}")
+    projects_payload = json.loads(response.read().decode("utf-8") or "{}")
+    projects_ok = response.status == 200 and isinstance(projects_payload.get("projects"), list)
+    conn.close()
+
+    conn = http.client.HTTPConnection(host, port, timeout=1.0)
+    conn.request("GET", "/api/health")
+    response = conn.getresponse()
+    health_payload = json.loads(response.read().decode("utf-8") or "{}")
+    film_ok = response.status == 200 and isinstance(health_payload.get("film"), dict)
 except Exception:
     sys.exit(1)
 finally:
@@ -49,11 +57,11 @@ finally:
     except Exception:
         pass
 
-sys.exit(0 if response.status == 200 and isinstance(payload.get("projects"), list) else 1)
+sys.exit(0 if projects_ok and film_ok else 1)
 PY
 }
 
-if api_is_ready && ! api_supports_projects; then
+if api_is_ready && ! api_supports_current_features; then
   pkill -f "node server/bookreader-api.mjs" || true
   pkill -f "npm run api" || true
   for _ in {1..20}; do
