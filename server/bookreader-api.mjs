@@ -46,10 +46,16 @@ const XAI_API_BASE_URL = normalizeBaseUrl(process.env.BOOKREADER_XAI_API_BASE_UR
 const XAI_API_CONTEXT_MODEL = process.env.BOOKREADER_XAI_API_CONTEXT_MODEL || "grok-4.3";
 const XAI_API_STORY_MODEL = process.env.BOOKREADER_XAI_API_STORY_MODEL || "grok-4.3";
 const XAI_API_FILM_MODEL = process.env.BOOKREADER_XAI_API_FILM_MODEL || XAI_API_STORY_MODEL;
+const XAI_API_IMAGE_MODEL = process.env.BOOKREADER_XAI_API_IMAGE_MODEL || "grok-imagine-image-quality";
+const XAI_IMAGE_PROMPT_MAX_CHARS = Number(process.env.BOOKREADER_XAI_IMAGE_PROMPT_MAX_CHARS || 1400);
 const XAI_API_MODEL_OPTIONS = [
   { id: "grok-4.3", label: "Grok 4.3" },
   { id: "grok-4.20", label: "Grok 4.20" },
   { id: "grok-build-0.1", label: "Grok Build 0.1" },
+];
+const XAI_API_IMAGE_MODEL_OPTIONS = [
+  { id: "grok-imagine-image-quality", label: "Grok Imagine Image Quality" },
+  { id: "grok-imagine-image", label: "Grok Imagine Image" },
 ];
 const MAX_CONTEXT_CHARS = Number(process.env.BOOKREADER_CONTEXT_MAX_CHARS || 18000);
 const REFERENCE_MAX_CHARS = Number(process.env.BOOKREADER_REFERENCE_MAX_CHARS || 60000);
@@ -337,6 +343,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "DELETE" && url.pathname.startsWith("/api/library/delete/")) {
+      await handleLibraryDelete(url, res);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/library/import-json") {
       await handleLibraryImportJson(req, res);
       return;
@@ -374,6 +385,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/api/story/generate") {
       await handleStoryGenerate(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/story/rechapter") {
+      await handleStoryRechapter(req, res);
       return;
     }
 
@@ -485,6 +501,7 @@ function healthPayload() {
       contextModel: XAI_API_CONTEXT_MODEL,
       storyModel: XAI_API_STORY_MODEL,
       filmModel: XAI_API_FILM_MODEL,
+      imageModel: XAI_API_IMAGE_MODEL,
     },
     storage: {
       outputDir: OUTPUT_DIR,
@@ -497,12 +514,18 @@ function healthPayload() {
 }
 
 async function modelCatalogPayload() {
-  const [ollama, deepseekApi, xaiApi] = await Promise.all([ollamaModelCatalog(), deepSeekApiModelCatalog(), xaiApiModelCatalog()]);
+  const [ollama, deepseekApi, xaiApi, xaiImageApi] = await Promise.all([
+    ollamaModelCatalog(),
+    deepSeekApiModelCatalog(),
+    xaiApiModelCatalog(),
+    xaiImageApiModelCatalog(),
+  ]);
   return {
     ok: true,
     ollama,
     deepseekApi,
     xaiApi,
+    xaiImageApi,
     defaults: {
       local: {
         fastContext: CONTEXT_MODEL,
@@ -519,6 +542,7 @@ async function modelCatalogPayload() {
         context: XAI_API_CONTEXT_MODEL,
         story: XAI_API_STORY_MODEL,
         film: XAI_API_FILM_MODEL,
+        image: XAI_API_IMAGE_MODEL,
       },
     },
   };
@@ -662,6 +686,53 @@ async function xaiApiModelCatalog() {
   }
 }
 
+async function xaiImageApiModelCatalog() {
+  const fallbackModels = normalizeModelOptions(XAI_API_IMAGE_MODEL_OPTIONS);
+  if (!XAI_API_KEY) {
+    return {
+      configured: false,
+      baseUrl: XAI_API_BASE_URL,
+      models: fallbackModels,
+    };
+  }
+
+  try {
+    const response = await fetch(apiUrl(XAI_API_BASE_URL, "/v1/image-generation-models"), {
+      headers: {
+        Authorization: `Bearer ${XAI_API_KEY}`,
+      },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        configured: true,
+        baseUrl: XAI_API_BASE_URL,
+        models: fallbackModels,
+        error: `xai_image_models_http_${response.status}`,
+      };
+    }
+
+    const liveModels = Array.isArray(payload.data)
+      ? payload.data.map((item) => ({
+          id: String(item.id || "").trim(),
+          label: String(item.id || "").trim(),
+        }))
+      : [];
+    return {
+      configured: true,
+      baseUrl: XAI_API_BASE_URL,
+      models: mergeModelOptions(fallbackModels, liveModels),
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      baseUrl: XAI_API_BASE_URL,
+      models: fallbackModels,
+      error: error instanceof Error && error.message ? error.message : "xai_image_models_unreachable",
+    };
+  }
+}
+
 function mergeModelOptions(primary, secondary) {
   return normalizeModelOptions([...primary, ...secondary]);
 }
@@ -789,6 +860,12 @@ async function handleLibrarySave(req, res) {
     }),
   );
   await sendJson(res, payload.ok ? 200 : 400, payload);
+}
+
+async function handleLibraryDelete(url, res) {
+  const id = decodeURIComponent(url.pathname.replace("/api/library/delete/", ""));
+  const payload = await runSqliteTool(["delete", "--db", SQLITE_DB, "--id", id]);
+  await sendJson(res, payload.ok ? 200 : 404, payload);
 }
 
 async function handleLibraryImportJson(req, res) {
@@ -926,6 +1003,7 @@ function normalizeBookReaderProject(project, fallbackSavedAt) {
     bookCover: project.bookCover && typeof project.bookCover === "object" ? project.bookCover : undefined,
     contextAnalysis: project.contextAnalysis,
     filmPlan: project.filmPlan,
+    storyPrompt: project.storyPrompt && typeof project.storyPrompt === "object" ? project.storyPrompt : undefined,
   };
 }
 
@@ -1365,6 +1443,147 @@ async function handleStoryGenerate(req, res) {
   });
 }
 
+async function handleStoryRechapter(req, res) {
+  const body = await readJson(req);
+  const title = String(body.title || "Nieuw verhaal").slice(0, 220);
+  const rawText = normalizeText(body.rawText || "");
+  const mode = body.mode === "deep" ? "deep" : "fast";
+  const provider = normalizeAiProvider(body.provider);
+  const localModel = mode === "deep" ? DEEP_STORY_MODEL : STORY_MODEL;
+  const defaultModel = provider === "local" ? localModel : apiDefaultModel(provider, "story");
+  const model = selectRequestModel(body.model, defaultModel);
+  const timeoutMs = mode === "deep" ? DEEP_STORY_TIMEOUT_MS : STORY_TIMEOUT_MS;
+  const requestedLanguage = String(body.language || "Auto").slice(0, 80);
+  const language = resolveStoryLanguage(requestedLanguage, rawText);
+  const chapterLabel = storyChapterLabel(language);
+  const targetChapters = clampNumber(Number(body.targetChapters || estimateChapterCount(rawText) || 8), 2, 40);
+  const sourceText = rawText.slice(0, mode === "deep" ? 90000 : 52000);
+  const providerLabel = provider === "local" ? "DeepSeek" : apiProviderLabel(provider);
+
+  if (!sourceText.trim()) {
+    await sendJson(res, 400, { ok: false, error: "empty_text" });
+    return;
+  }
+
+  const prompt = buildStoryRechapterPrompt({
+    title,
+    rawText: sourceText,
+    targetChapters,
+    language,
+    chapterLabel,
+  });
+  const originalWords = countWords(sourceText);
+
+  if (provider !== "local") {
+    const apiResult = await runDeepSeekApiChat({
+      apiProvider: provider,
+      res,
+      model,
+      messages: [
+        {
+          role: "system",
+          content: "You are BookReader's chapter editor. Return only the re-chaptered Markdown story. Do not include analysis, JSON, notes, or hidden reasoning.",
+        },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.08,
+      maxTokens: Math.min(64000, Math.max(3200, Math.round(originalWords * 1.9))),
+      timeoutMs,
+      timeoutError: "rechapter_model_timeout",
+      timeoutMessage: `${providerLabel}-hoofdstukindeling duurde langer dan ${timeoutMs} ms. Probeer minder tekst of de snelle stand.`,
+      unreachableError: "rechapter_model_unreachable",
+      unreachableMessage: `${providerLabel} kon niet worden bereikt voor hoofdstukindeling.`,
+      failureError: "rechapter_model_failed",
+    });
+    if (apiResult.clientClosed) return;
+    if (!apiResult.ok) {
+      await sendJson(res, apiResult.status, apiResult.payload);
+      return;
+    }
+    await sendRechapterResult(res, {
+      provider: apiResponseProvider(provider),
+      model,
+      mode,
+      title,
+      rawText: sourceText,
+      generatedText: apiResult.content,
+      targetChapters,
+      chapterLabel,
+    });
+    return;
+  }
+
+  const available = await isOllamaModelAvailable(model);
+  if (!available) {
+    await sendJson(res, 503, {
+      ok: false,
+      error: "rechapter_model_not_available",
+      message: `Ollama model ${model} is niet beschikbaar. Run: ollama pull ${model}`,
+      model,
+    });
+    return;
+  }
+
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => abortController.abort(new Error("rechapter_timeout")), timeoutMs);
+  res.on("close", () => {
+    if (!res.writableEnded) abortController.abort(new Error("client_closed"));
+  });
+
+  let response;
+  try {
+    response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        prompt,
+        stream: false,
+        options: {
+          temperature: 0.08,
+          top_p: 0.85,
+          num_ctx: mode === "deep" ? 8192 : 4096,
+          num_predict: Math.min(mode === "deep" ? 16000 : 9000, Math.max(2800, Math.round(originalWords * 1.8))),
+        },
+        keep_alive: "10m",
+      }),
+      signal: abortController.signal,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "client_closed") return;
+    const timedOut = message === "rechapter_timeout" || (error instanceof Error && error.name === "TimeoutError");
+    await sendJson(res, timedOut ? 504 : 502, {
+      ok: false,
+      error: timedOut ? "rechapter_model_timeout" : "rechapter_model_unreachable",
+      message: timedOut
+        ? `Lokale hoofdstukindeling duurde langer dan ${timeoutMs} ms. Probeer minder tekst of een sneller model.`
+        : "Ollama kon niet worden bereikt voor hoofdstukindeling.",
+      model,
+    });
+    return;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    await sendJson(res, response.status, { ok: false, error: "rechapter_model_failed", details: payload });
+    return;
+  }
+
+  await sendRechapterResult(res, {
+    provider: "ollama",
+    model,
+    mode,
+    title,
+    rawText: sourceText,
+    generatedText: String(payload.response || ""),
+    targetChapters,
+    chapterLabel,
+  });
+}
+
 async function handleFilmPlan(req, res) {
   const body = await readJson(req);
   const title = String(body.title || "Untitled").slice(0, 220);
@@ -1755,11 +1974,28 @@ async function handleIllustrationGenerate(req, res) {
   const prompt = String(body.prompt || "").trim();
   const negativePrompt = String(body.negativePrompt || "low quality, blurry, text, watermark").trim();
   const seed = Number.isFinite(Number(body.seed)) ? Number(body.seed) : Math.floor(Math.random() * 1_000_000_000);
+  const provider = normalizeImageProvider(body.provider);
+  const kind = slug(String(body.kind || "image")).slice(0, 40) || "image";
+  const label = slug(String(body.label || "")).slice(0, 50);
 
   if (!prompt) {
     await sendJson(res, 400, { ok: false, error: "empty_prompt" });
     return;
   }
+
+  if (provider === "grok") {
+    await handleXaiImageGenerate({
+      res,
+      prompt,
+      negativePrompt,
+      kind,
+      label,
+      model: selectRequestModel(body.model, XAI_API_IMAGE_MODEL),
+      aspectRatio: selectImageAspectRatio(body.aspectRatio, kind),
+    });
+    return;
+  }
+
   if (!COMFY_WORKFLOW || !existsSync(COMFY_WORKFLOW)) {
     await sendJson(res, 503, {
       ok: false,
@@ -1793,6 +2029,163 @@ async function handleIllustrationGenerate(req, res) {
     injectedNodes: injected.injectedNodes,
     status: "queued",
   });
+}
+
+function normalizeImageProvider(value) {
+  const provider = String(value || "").trim().toLowerCase();
+  return provider === "grok" || provider === "xai" || provider === "xai-image" ? "grok" : "comfy";
+}
+
+function selectImageAspectRatio(value, kind) {
+  const requested = String(value || "").trim();
+  const allowed = new Set(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20", "auto"]);
+  if (allowed.has(requested)) return requested;
+  if (kind === "cover") return "2:3";
+  if (kind === "portrait") return "3:4";
+  return "4:3";
+}
+
+async function handleXaiImageGenerate({ res, prompt, negativePrompt, kind, label, model, aspectRatio }) {
+  if (!XAI_API_KEY) {
+    await sendJson(res, 503, {
+      ok: false,
+      error: "xai_api_key_missing",
+      message: "Grok beeldgeneratie is gekozen, maar BOOKREADER_XAI_API_KEY staat niet op de server.",
+      model,
+    });
+    return;
+  }
+
+  const imagePrompt = buildXaiImagePrompt({ prompt, negativePrompt, kind });
+  let response;
+  try {
+    response = await fetch(apiUrl(XAI_API_BASE_URL, "/v1/images/generations"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${XAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        prompt: imagePrompt,
+        n: 1,
+        aspect_ratio: aspectRatio,
+      }),
+    });
+  } catch (error) {
+    await sendJson(res, 502, {
+      ok: false,
+      error: "xai_image_unreachable",
+      message: error instanceof Error ? error.message : "Grok beeldgeneratie kon niet worden bereikt.",
+      model,
+    });
+    return;
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    await sendJson(res, response.status, {
+      ok: false,
+      error: "xai_image_failed",
+      message: "Grok beeldgeneratie gaf een fout terug.",
+      model,
+      details: sanitizeProviderApiError(payload),
+    });
+    return;
+  }
+
+  const image = Array.isArray(payload.data) ? payload.data[0] : null;
+  try {
+    const stored = await storeGeneratedImage({
+      url: String(image?.url || ""),
+      b64Json: String(image?.b64_json || ""),
+      contentType: String(image?.mime_type || "image/jpeg"),
+      kind,
+      label,
+    });
+    await sendJson(res, 200, {
+      ok: true,
+      provider: "xai-image",
+      model,
+      prompt: imagePrompt,
+      revisedPrompt: String(image?.revised_prompt || ""),
+      status: "complete",
+      complete: true,
+      imageUrl: stored.imageUrl,
+      filePath: stored.filePath,
+      bytes: stored.bytes,
+      contentType: stored.contentType,
+    });
+  } catch (error) {
+    await sendJson(res, 502, {
+      ok: false,
+      error: "xai_image_cache_failed",
+      message: error instanceof Error ? error.message : "Grok-afbeelding kon niet lokaal worden opgeslagen.",
+      model,
+    });
+  }
+}
+
+function buildXaiImagePrompt({ prompt, negativePrompt, kind }) {
+  const subject =
+    kind === "cover"
+      ? "Book cover illustration grounded in the actual story."
+      : kind === "portrait"
+        ? "Single character portrait grounded in the actual story description."
+        : "Chapter illustration grounded in one literal scene from the actual story.";
+  const antiOldMaster = [
+    "Do not use Dutch Golden Age painting, Jan Steen, Rembrandt, old master oil painting, tavern scene, caricature, Anton Pieck, nostalgic Dutch village painting, or antique postcard styling.",
+    "Use clean contemporary narrative illustration with stable anatomy, consistent face, natural hands, clear eyes, readable pose, and no melted or distorted features.",
+    "Do not add extra people, unrelated scenery, readable text, watermark, logo, decorative filler, or symbolic collage.",
+  ].join(" ");
+  const avoid = negativePrompt ? `Avoid: ${negativePrompt}.` : "";
+  return truncate([
+    subject,
+    "STRICT STORY LOCK: preserve only the characters, setting, objects, mood, and action described by the prompt.",
+    prompt,
+    antiOldMaster,
+    avoid,
+  ].filter(Boolean).join(" "), XAI_IMAGE_PROMPT_MAX_CHARS);
+}
+
+async function storeGeneratedImage({ url, b64Json, contentType, kind, label }) {
+  let buffer;
+  let safeContentType = String(contentType || "image/png").split(";")[0].trim().toLowerCase();
+  if (b64Json) {
+    buffer = Buffer.from(String(b64Json || "").replace(/\s+/g, ""), "base64");
+  } else if (url?.startsWith("data:")) {
+    const parsed = parseDataImage(url);
+    buffer = parsed.buffer;
+    safeContentType = parsed.contentType;
+  } else if (url) {
+    const absoluteUrl = url.startsWith("/") ? `http://${HOST}:${PORT}${url}` : url;
+    const response = await fetch(absoluteUrl);
+    if (!response.ok) {
+      throw new Error(`Afbeelding kon niet worden opgehaald: HTTP ${response.status}`);
+    }
+    safeContentType = String(response.headers.get("content-type") || safeContentType || "image/png").split(";")[0].trim().toLowerCase();
+    buffer = Buffer.from(await response.arrayBuffer());
+  }
+
+  if (!buffer?.length) {
+    throw new Error("Gegenereerde afbeelding was leeg.");
+  }
+  if (!safeContentType.startsWith("image/")) {
+    throw new Error("De gegenereerde respons was geen afbeelding.");
+  }
+
+  const fileKind = slug(kind).slice(0, 40) || "image";
+  const fileLabel = slug(label).slice(0, 50);
+  const extension = imageExtension(safeContentType);
+  const fileName = `${Date.now()}-${fileKind}${fileLabel ? `-${fileLabel}` : ""}-${randomUUID()}.${extension}`;
+  const filePath = join(IMAGES_DIR, fileName);
+  writeFileSync(filePath, buffer);
+  return {
+    imageUrl: `/api/media/images/${encodeURIComponent(fileName)}`,
+    filePath,
+    bytes: buffer.length,
+    contentType: safeContentType,
+  };
 }
 
 async function handleIllustrationStatus(url, res) {
@@ -2593,6 +2986,106 @@ ${prompt}
 `;
 }
 
+function buildStoryRechapterPrompt({ title, rawText, targetChapters, language, chapterLabel }) {
+  return `You are BookReader's chapter editor.
+Your task is to re-divide an existing story into clear chapters.
+
+Output rules:
+- Return Markdown only.
+- Start with exactly one H1 title: "# ${title || "Nieuw verhaal"}".
+- Use chapter headings like "## ${chapterLabel} 1 - <specific chapter title>" through about ${targetChapters} chapters.
+- Chapter titles must describe what happens in that chapter.
+- Preserve the story's original language: ${language}.
+- Preserve the original story order and meaning.
+- Do not summarize the story.
+- Do not add new scenes, characters, plot events, morals, explanations, notes, or commentary.
+- Do not remove important paragraphs.
+- You may move paragraph breaks and add chapter headings.
+- You may lightly fix obvious broken line breaks, but do not rewrite the prose style.
+- If the text already contains headings, replace them with a cleaner chapter structure.
+
+Story title: ${title}
+Target chapters: ${targetChapters}
+
+Story text:
+${rawText}
+`;
+}
+
+async function sendRechapterResult(res, { provider, model, mode, title, rawText, generatedText, targetChapters, chapterLabel }) {
+  const cleaned = cleanGeneratedStory(generatedText);
+  const extractedTitle = extractStoryTitle(cleaned);
+  const finalTitle = extractedTitle && !isGenericStoryTitle(extractedTitle) ? extractedTitle : title || "Nieuw verhaal";
+  const story = ensureChapteredMarkdown(cleaned, finalTitle, targetChapters, chapterLabel);
+  const originalWords = countWords(rawText);
+  const wordCount = countWords(story);
+  const chapterCount = countStorySectionMarkers(story);
+  const minWords = Math.max(120, Math.round(originalWords * 0.72));
+
+  if (originalWords > 220 && wordCount < minWords) {
+    await sendJson(res, 422, {
+      ok: false,
+      error: "rechapter_too_short",
+      message: "Het model heeft het verhaal waarschijnlijk samengevat in plaats van alleen herverdeeld. Probeer de diepe stand of minder tekst.",
+      provider,
+      model,
+      mode,
+      originalWords,
+      wordCount,
+      preview: story.slice(0, 1400),
+    });
+    return;
+  }
+
+  await sendJson(res, 200, {
+    ok: true,
+    provider,
+    model,
+    mode,
+    title: finalTitle,
+    story,
+    targetChapters,
+    chapterCount,
+    wordCount,
+  });
+}
+
+function ensureChapteredMarkdown(rawStory, title, targetChapters, chapterLabel) {
+  let story = cleanGeneratedStory(rawStory);
+  if (!story.trim()) story = "";
+
+  if (/^#\s+.+$/m.test(story)) {
+    story = story.replace(/^#\s+.+$/m, `# ${title}`);
+  } else {
+    story = `# ${title}\n\n${story}`;
+  }
+
+  if (countStorySectionMarkers(story) >= Math.min(2, targetChapters)) {
+    return story.trim();
+  }
+
+  const body = story.replace(/^#\s+.+\n*/, "").trim();
+  if (!body) return `# ${title}\n\n## ${chapterLabel} 1 - Begin\n\n`;
+  const paragraphs = body.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
+  const units = paragraphs.length >= Math.min(targetChapters, 4) ? paragraphs : splitSentences(body);
+  const target = clampNumber(targetChapters, 2, 40);
+  const perChapter = Math.max(1, Math.ceil(units.length / target));
+  const sections = [];
+
+  for (let index = 0; index < target; index += 1) {
+    const chunk = units.slice(index * perChapter, (index + 1) * perChapter).join(paragraphs.length >= Math.min(targetChapters, 4) ? "\n\n" : " ");
+    if (!chunk.trim()) continue;
+    const sectionTitle = deriveChapterTitle(chunk, chapterLabel, index + 1);
+    sections.push(`## ${chapterLabel} ${index + 1} - ${sectionTitle}\n\n${chunk.trim()}`);
+  }
+
+  return [`# ${title}`, ...sections].join("\n\n").trim();
+}
+
+function countStorySectionMarkers(story) {
+  return (String(story || "").match(/^##\s*(?:hoofdstuk|chapter|pagina|page|seite|página)\s+\d+\b/gim) || []).length;
+}
+
 function cleanGeneratedStory(value) {
   return String(value || "")
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
@@ -2815,6 +3308,15 @@ function storyPageLabel(language) {
   return "Pagina";
 }
 
+function storyChapterLabel(language) {
+  const lower = normalizeText(language).toLowerCase();
+  if (lower.includes("english")) return "Chapter";
+  if (lower.includes("deutsch") || lower.includes("german")) return "Kapitel";
+  if (lower.includes("español") || lower.includes("spanish")) return "Capítulo";
+  if (lower.includes("français") || lower.includes("french")) return "Chapitre";
+  return "Hoofdstuk";
+}
+
 function pageMarkerRegex() {
   return /^##\s*(pagina|page|seite|página)\s+\d+\b/gim;
 }
@@ -2911,7 +3413,7 @@ Rules:
 - chapterPrompt must describe one literal moment from the selected chapter, not a poster or montage.
 - chapterPrompt must include exact characters present, supported appearance details, location, time/mood, important objects, and what should NOT be added.
 - coverPrompt must be grounded in the whole story's central image and recurring characters/objects; it may be composed as a cover, but it must not invent a different setting.
-- Do not request abstract art, modern art, nostalgic Dutch-village painting, Anton Pieck/Piek-like scenery, unrelated fantasy villages, or extra people unless the story says so.
+- Do not request abstract art, modern art, Jan Steen, Dutch Golden Age painting, old master oil painting, tavern scenes, nostalgic Dutch-village painting, Anton Pieck/Piek-like scenery, unrelated fantasy villages, or extra people unless the story says so.
 - If appearance, clothing, age, location or object details are unknown, keep them neutral instead of inventing ornate replacements.
 - No readable text, no watermark.
 - Keep every field compact. Do not repeat whole chapters inside descriptions or prompts.
@@ -3070,7 +3572,7 @@ function buildHeuristicContextAnalysis({ title, rawText, chapterTitle, chapterTe
     mood: inferMood(selectedText || fullText),
     forbidden: [
       "do not turn this into abstract modern art",
-      "do not use nostalgic Dutch village, Anton Pieck-like or Anton Piek-like scenery unless the story explicitly describes it",
+      "do not use Jan Steen, Dutch Golden Age, old master oil painting, tavern scene, nostalgic Dutch village, Anton Pieck-like or Anton Piek-like scenery unless the story explicitly describes it",
       "do not add unrelated castles, towns, forests, crowds, costumes, animals, weapons, or fantasy elements",
       "do not change the number or identity of visible main characters",
     ],
@@ -3166,7 +3668,7 @@ function anchorPrompts({ chapterPrompt, coverPrompt, sceneBrief, characters, fal
     brief.mustShow.length ? `Must show: ${brief.mustShow.map(toVisualEnglish).join("; ")}.` : "",
     brief.objects.length ? `Important objects: ${brief.objects.map(toVisualEnglish).join(", ")}.` : "",
     characterDetails ? `Character continuity: ${characterDetails}.` : "",
-    "Do not add unrelated scenery, extra named characters, generic fantasy villages, abstract modern art, or nostalgic Anton Pieck/Piek-like Dutch village styling.",
+    "Do not add unrelated scenery, extra named characters, generic fantasy villages, abstract modern art, Jan Steen/Dutch Golden Age/old master oil painting, tavern scenes, or nostalgic Anton Pieck/Piek-like Dutch village styling.",
   ].filter(Boolean).join(" ");
 
   const baseChapterPrompt = chapterPrompt || fallbackAnalysis.chapterPrompt;
@@ -3651,7 +4153,7 @@ async function sendJson(res, status, payload) {
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", process.env.BOOKREADER_CORS_ORIGIN || "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 

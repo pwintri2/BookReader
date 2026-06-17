@@ -56,6 +56,7 @@ export type ApiHealth = {
     contextModel: string;
     storyModel: string;
     filmModel: string;
+    imageModel?: string;
   };
   storage?: {
     outputDir: string;
@@ -95,6 +96,12 @@ export type ModelCatalogResponse = {
     models: ModelOption[];
     error?: string;
   };
+  xaiImageApi: {
+    configured: boolean;
+    baseUrl: string;
+    models: ModelOption[];
+    error?: string;
+  };
   defaults: {
     local: {
       fastContext: string;
@@ -111,6 +118,7 @@ export type ModelCatalogResponse = {
       context: string;
       story: string;
       film: string;
+      image: string;
     };
   };
 };
@@ -144,6 +152,29 @@ export type StoryGenerateResponse = {
   requestedWords: number;
   language?: string;
   wordCount: number;
+};
+
+export type StoryRechapterRequest = {
+  title: string;
+  rawText: string;
+  targetChapters?: number;
+  language?: string;
+  mode?: "fast" | "deep";
+  provider?: AiProvider;
+  model?: string;
+};
+
+export type StoryRechapterResponse = {
+  ok: boolean;
+  provider: string;
+  model: string;
+  mode: "fast" | "deep";
+  title: string;
+  story: string;
+  targetChapters: number;
+  chapterCount: number;
+  wordCount: number;
+  warning?: string;
 };
 
 export type FilmPlanScene = {
@@ -222,18 +253,33 @@ export type IllustrationRequest = {
   prompt: string;
   negativePrompt: string;
   seed?: number;
+  provider?: ImageProvider;
+  model?: string;
+  kind?: "chapter" | "cover" | "portrait" | "image";
+  label?: string;
+  aspectRatio?: string;
 };
 
 export type IllustrationJob = {
   ok: boolean;
+  provider?: string;
+  model?: string;
   promptId?: string;
   status?: string;
+  complete?: boolean;
+  imageUrl?: string;
+  filePath?: string;
+  bytes?: number;
+  contentType?: string;
   prompt?: string;
+  revisedPrompt?: string;
   negativePrompt?: string;
   seed?: number;
   error?: string;
   message?: string;
 };
+
+export type ImageProvider = "comfy" | "grok";
 
 export type IllustrationImage = {
   filename: string;
@@ -378,6 +424,13 @@ export type LibrarySaveResponse = {
   project: LibraryProjectSummary;
 };
 
+export type LibraryDeleteResponse = {
+  ok: boolean;
+  dbPath: string;
+  project?: LibraryProjectSummary;
+  categories?: LibraryCategory[];
+};
+
 export type LibraryImportResponse = {
   ok: boolean;
   dbPath: string;
@@ -448,6 +501,12 @@ export async function saveLibraryProject(apiBase: string, project: BookProject, 
   });
 }
 
+export async function deleteLibraryProject(apiBase: string, id: string): Promise<LibraryDeleteResponse> {
+  return requestJson<LibraryDeleteResponse>(apiBase, `/api/library/delete/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function importJsonProjectsToLibrary(apiBase: string): Promise<LibraryImportResponse> {
   return requestJson<LibraryImportResponse>(apiBase, "/api/library/import-json", {
     method: "POST",
@@ -500,6 +559,13 @@ export async function analyzeContext(apiBase: string, payload: ContextAnalyzeReq
 
 export async function generateStory(apiBase: string, payload: StoryGenerateRequest): Promise<StoryGenerateResponse> {
   return requestJson<StoryGenerateResponse>(apiBase, "/api/story/generate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function rechapterStory(apiBase: string, payload: StoryRechapterRequest): Promise<StoryRechapterResponse> {
+  return requestJson<StoryRechapterResponse>(apiBase, "/api/story/rechapter", {
     method: "POST",
     body: JSON.stringify(payload),
   });

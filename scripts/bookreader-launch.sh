@@ -74,6 +74,7 @@ try:
         and isinstance(models_payload.get("ollama", {}).get("models"), list)
         and isinstance(models_payload.get("deepseekApi", {}).get("models"), list)
         and isinstance(models_payload.get("xaiApi", {}).get("models"), list)
+        and isinstance(models_payload.get("xaiImageApi", {}).get("models"), list)
     )
 except Exception:
     sys.exit(1)

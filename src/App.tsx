@@ -35,6 +35,7 @@ import {
   ContextAnalysis,
   FilmPlan,
   assignLibraryCategory,
+  deleteLibraryProject,
   generateIllustration,
   generateStory,
   getHealth,
@@ -42,6 +43,7 @@ import {
   getModelCatalog,
   createLibraryCategory,
   importJsonProjectsToLibrary,
+  ImageProvider,
   LibraryCategory,
   LibraryProjectSummary,
   listLibraryCategories,
@@ -54,6 +56,7 @@ import {
   openProjectFile,
   planFilm,
   ProjectFileSummary,
+  rechapterStory,
   saveDeepSeekApiKey,
   saveLibraryProject,
   saveXaiApiKey,
@@ -67,6 +70,7 @@ import {
   SavedBookCover,
   SavedChapterIllustration,
   SavedCharacterPortrait,
+  StoryPromptMeta,
 } from "./lib/bookProject";
 import { Chapter, ChapterStats, MAX_WORDS, splitIntoChapters } from "./lib/chapters";
 import { parseFile } from "./lib/documentParser";
@@ -134,6 +138,11 @@ const DEFAULT_NEGATIVE_PROMPT = [
   "abstract art",
   "modern art",
   "surreal unrelated composition",
+  "Jan Steen style",
+  "Dutch Golden Age painting",
+  "old master oil painting",
+  "tavern scene",
+  "caricature faces",
   "Anton Pieck style",
   "Anton Piek style",
   "nostalgic Dutch village painting",
@@ -142,6 +151,10 @@ const DEFAULT_NEGATIVE_PROMPT = [
   "extra main characters",
   "missing main character",
   "wrong character identity",
+  "deformed face",
+  "melted face",
+  "mutated eyes",
+  "bad anatomy",
 ].join(", ");
 
 const VOICE_STYLES: VoiceStyle[] = [
@@ -212,6 +225,8 @@ export function App() {
   const [selectedLocalModel, setSelectedLocalModel] = useState("");
   const [selectedApiModel, setSelectedApiModel] = useState("");
   const [selectedGrokModel, setSelectedGrokModel] = useState("");
+  const [imageProvider, setImageProvider] = useState<ImageProvider>("comfy");
+  const [selectedGrokImageModel, setSelectedGrokImageModel] = useState("");
   const [deepSeekApiKeyInput, setDeepSeekApiKeyInput] = useState("");
   const [deepSeekKeyBusy, setDeepSeekKeyBusy] = useState(false);
   const [xaiApiKeyInput, setXaiApiKeyInput] = useState("");
@@ -233,13 +248,27 @@ export function App() {
   const [contextAnalysis, setContextAnalysis] = useState<ContextAnalysis | null>(null);
   const [contextBusy, setContextBusy] = useState(false);
   const [contextStatus, setContextStatus] = useState("nog niet geanalyseerd");
-  const [storyPrompt, setStoryPrompt] = useState("Een meisje vindt onder een oude brug een zilveren deur die alleen bij maanlicht opengaat.");
+  const initialStoryPromptMeta = useMemo(() => {
+    const characters = "Luna / 17 / girl";
+    const plot = "Luna finds a silver door under an old bridge. The door only opens in moonlight and leads to a hidden place connected to her family history.";
+    const mainEvent = "Focus on the moment Luna opens the silver door for the first time and chooses whether to step through.";
+    return buildGuidedStoryPrompt(characters, plot, mainEvent);
+  }, []);
+  const [storyPrompt, setStoryPrompt] = useState(initialStoryPromptMeta.prompt);
+  const [storyPromptMeta, setStoryPromptMeta] = useState<StoryPromptMeta>(initialStoryPromptMeta);
+  const [promptBuilderOpen, setPromptBuilderOpen] = useState(false);
+  const [promptCharacters, setPromptCharacters] = useState(initialStoryPromptMeta.characters);
+  const [promptPlot, setPromptPlot] = useState(initialStoryPromptMeta.plot);
+  const [promptMainEvent, setPromptMainEvent] = useState(initialStoryPromptMeta.mainEvent);
   const [storyPages, setStoryPages] = useState(4);
   const [storyWordsPerPage, setStoryWordsPerPage] = useState(550);
   const [storyLanguage, setStoryLanguage] = useState<StoryLanguage>("Auto");
   const [storyMode, setStoryMode] = useState<"fast" | "deep">("deep");
   const [storyNarrativePreset, setStoryNarrativePreset] = useState<StoryNarrativePreset>("balanced");
   const [aiProvider, setAiProvider] = useState<AiProvider>("local");
+  const [chapterTargetCount, setChapterTargetCount] = useState(8);
+  const [chapteringBusy, setChapteringBusy] = useState(false);
+  const [chapteringStatus, setChapteringStatus] = useState("AI-hoofdstukken klaar");
   const [storyGenre, setStoryGenre] = useState("avontuurlijk mysterie");
   const [storyTone, setStoryTone] = useState("beeldend, warm en spannend");
   const [referenceTitle, setReferenceTitle] = useState("");
@@ -327,6 +356,10 @@ export function App() {
   const grokModelOptions = useMemo(
     () => withSelectedModel(modelCatalog?.xaiApi.models || [], selectedGrokModel),
     [modelCatalog?.xaiApi.models, selectedGrokModel],
+  );
+  const grokImageModelOptions = useMemo(
+    () => withSelectedModel(modelCatalog?.xaiImageApi.models || [], selectedGrokImageModel),
+    [modelCatalog?.xaiImageApi.models, selectedGrokImageModel],
   );
   const activeModelOptions =
     normalizedAiProvider === "deepseek" ? deepseekModelOptions : normalizedAiProvider === "grok" ? grokModelOptions : localModelOptions;
@@ -473,6 +506,20 @@ export function App() {
     setFilmStatus(project.filmPlan ? "filmplan geladen" : "klaar voor adaptatie");
     setBookCover(project.bookCover || { prompt: buildCoverPrompt(project.title, result.chapters, "storybook") });
     setCoverStatus(project.bookCover?.imageUrl ? "cover geladen" : "klaar voor cover");
+    if (project.storyPrompt?.prompt) {
+      setStoryPrompt(project.storyPrompt.prompt);
+      setStoryPromptMeta(project.storyPrompt);
+      setPromptCharacters(project.storyPrompt.characters || "");
+      setPromptPlot(project.storyPrompt.plot || "");
+      setPromptMainEvent(project.storyPrompt.mainEvent || "");
+    } else {
+      const emptyPrompt = buildGuidedStoryPrompt("", "", "");
+      setStoryPrompt("");
+      setStoryPromptMeta(emptyPrompt);
+      setPromptCharacters("");
+      setPromptPlot("");
+      setPromptMainEvent("");
+    }
     stopSpeech();
   }
 
@@ -502,6 +549,52 @@ export function App() {
 
   function refreshFromText() {
     processText(documentTitle, rawText);
+  }
+
+  function saveGuidedPrompt() {
+    const nextPrompt = buildGuidedStoryPrompt(promptCharacters, promptPlot, promptMainEvent);
+    if (!nextPrompt.characters.trim() || !nextPrompt.plot.trim() || !nextPrompt.mainEvent.trim()) {
+      setNotice("Vul alle drie de promptvragen in.");
+      return;
+    }
+    setStoryPrompt(nextPrompt.prompt);
+    setStoryPromptMeta(nextPrompt);
+    setPromptBuilderOpen(false);
+    setNotice("Prompt gemaakt en bewaard bij dit verhaal.");
+  }
+
+  async function repartitionStoryWithAi() {
+    if (!rawText.trim()) {
+      setNotice("Geen verhaaltekst om te herverdelen.");
+      return;
+    }
+    setChapteringBusy(true);
+    const providerLabel = aiProviderLabel(aiProvider);
+    setChapteringStatus(`${providerLabel} ${activeModelLabel} herverdeelt het verhaal in hoofdstukken...`);
+    setNotice("");
+    try {
+      const response = await rechapterStory(apiBase, {
+        title: documentTitle,
+        rawText,
+        targetChapters: chapterTargetCount,
+        language: storyLanguage,
+        mode: storyMode,
+        provider: aiProvider,
+        model: selectedAiModel || undefined,
+      });
+      processText(response.title, response.story);
+      const responseProvider = responseProviderLabel(response.provider);
+      setChapteringStatus(
+        `${responseProvider} ${response.model}: ${response.chapterCount} hoofdstukken, ${response.wordCount.toLocaleString("nl-NL")} woorden`,
+      );
+      setNotice(response.warning || `Verhaal opnieuw verdeeld in ${response.chapterCount} hoofdstukken.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "AI-hoofdstukken konden niet worden gemaakt.";
+      setChapteringStatus(message);
+      setNotice(message);
+    } finally {
+      setChapteringBusy(false);
+    }
   }
 
   function combinedReferencePayload() {
@@ -610,6 +703,7 @@ export function App() {
         chapterIllustrations: [],
         characterPortraits: [],
         bookCover: { prompt: buildCoverPrompt(response.title, generatedChapters, illustrationStyleId) },
+        storyPrompt: storyPromptMeta,
       } satisfies BookProject;
       saveStoryToLibrary(generatedProject);
       let libraryNote = "";
@@ -853,17 +947,24 @@ export function App() {
       );
       setSelectedApiModel((current) => chooseCatalogModel(current, catalog.deepseekApi.models, [catalog.defaults.api.story, catalog.defaults.api.context]));
       setSelectedGrokModel((current) => chooseCatalogModel(current, catalog.xaiApi.models, [catalog.defaults.xai.film, catalog.defaults.xai.story, catalog.defaults.xai.context]));
+      setSelectedGrokImageModel((current) => chooseCatalogModel(current, catalog.xaiImageApi.models, [catalog.defaults.xai.image]));
       const ollamaLabel = catalog.ollama.models.length ? `${catalog.ollama.models.length} Ollama` : "geen Ollama";
       const deepseekLabel = catalog.deepseekApi.models.length ? `${catalog.deepseekApi.models.length} DeepSeek API` : "geen DeepSeek API";
       const grokLabel = catalog.xaiApi.models.length ? `${catalog.xaiApi.models.length} Grok API` : "geen Grok API";
+      const grokImageLabel = catalog.xaiImageApi.models.length ? `${catalog.xaiImageApi.models.length} Grok beeld` : "geen Grok beeld";
       const warning = [
         catalog.ollama.error ? "Ollama lijst niet live" : "",
         catalog.deepseekApi.error ? "DeepSeek lijst fallback" : "",
         catalog.xaiApi.error ? "Grok lijst fallback" : "",
+        catalog.xaiImageApi.error ? "Grok beeldlijst fallback" : "",
       ]
         .filter(Boolean)
         .join(", ");
-      setModelCatalogStatus(warning ? `${ollamaLabel}, ${deepseekLabel}, ${grokLabel} (${warning})` : `${ollamaLabel}, ${deepseekLabel}, ${grokLabel}`);
+      setModelCatalogStatus(
+        warning
+          ? `${ollamaLabel}, ${deepseekLabel}, ${grokLabel}, ${grokImageLabel} (${warning})`
+          : `${ollamaLabel}, ${deepseekLabel}, ${grokLabel}, ${grokImageLabel}`,
+      );
       if (showNotice) setNotice("Modellenlijst bijgewerkt.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Modellenlijst kon niet worden geladen.";
@@ -958,36 +1059,67 @@ export function App() {
     return mediaUrl(apiBase, cached.imageUrl);
   }
 
+  async function resolveImageJob(job: Awaited<ReturnType<typeof generateIllustration>>, kind: "chapter" | "cover" | "portrait", label: string) {
+    if (job.imageUrl) {
+      if (job.filePath) {
+        setAssetStorageStatus(`Laatste beeld opgeslagen: ${job.filePath}`);
+      }
+      return {
+        imageUrl: mediaUrl(apiBase, job.imageUrl),
+        jobId: job.promptId || "",
+      };
+    }
+    if (!job.promptId) {
+      throw new Error(job.message || `${imageProviderLabel(imageProvider)} gaf geen beeldjob terug.`);
+    }
+    const status = await pollIllustration(job.promptId);
+    const firstImage = status.images[0];
+    if (!firstImage) {
+      return {
+        imageUrl: "",
+        jobId: job.promptId,
+      };
+    }
+    return {
+      imageUrl: await cacheGeneratedImage(mediaUrl(apiBase, firstImage.url), kind, label),
+      jobId: job.promptId,
+    };
+  }
+
+  function selectedImageModel(): string | undefined {
+    return imageProvider === "grok" ? selectedGrokImageModel || modelCatalog?.defaults.xai.image : undefined;
+  }
+
   async function createIllustration() {
     if (!selectedChapter) return;
     setIllustrationBusy(true);
-    setIllustrationStatus("ComfyUI job starten...");
+    setIllustrationStatus(`${imageProviderLabel(imageProvider)} job starten...`);
     setNotice("");
     try {
       const job = await generateIllustration(apiBase, {
         prompt: illustrationPrompt || buildIllustrationPrompt(documentTitle, selectedChapter, illustrationStyleId),
         negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+        provider: imageProvider,
+        model: selectedImageModel(),
+        kind: "chapter",
+        label: selectedChapter.title,
+        aspectRatio: "4:3",
       });
-      if (!job.promptId) {
-        throw new Error(job.message || "ComfyUI gaf geen prompt-id terug.");
-      }
-      setIllustrationJobId(job.promptId);
-      setIllustrationStatus("ComfyUI rendert...");
-      const status = await pollIllustration(job.promptId);
-      const firstImage = status.images[0];
-      if (!firstImage) {
+      setIllustrationJobId(job.promptId || "");
+      setIllustrationStatus(`${imageProviderLabel(imageProvider)} rendert...`);
+      const resolved = await resolveImageJob(job, "chapter", selectedChapter.title);
+      if (!resolved.imageUrl) {
         setIllustrationStatus("Nog geen afbeelding terug.");
         return;
       }
-      const imageUrl = await cacheGeneratedImage(mediaUrl(apiBase, firstImage.url), "chapter", selectedChapter.title);
-      setIllustrationUrl(imageUrl);
+      setIllustrationUrl(resolved.imageUrl);
       setChapterIllustrations((previous) => ({
         ...previous,
         [selectedChapter.id]: {
           chapterId: selectedChapter.id,
           prompt: illustrationPrompt,
-          imageUrl,
-          jobId: job.promptId,
+          imageUrl: resolved.imageUrl,
+          jobId: resolved.jobId,
           },
       }));
       setIllustrationStatus("illustratie klaar en lokaal opgeslagen");
@@ -1059,27 +1191,27 @@ export function App() {
 
   async function createBookCover() {
     setCoverBusy(true);
-    setCoverStatus("ComfyUI coverjob starten...");
+    setCoverStatus(`${imageProviderLabel(imageProvider)} coverjob starten...`);
     try {
       const job = await generateIllustration(apiBase, {
         prompt: bookCover.prompt || buildCoverPrompt(documentTitle, chapters, illustrationStyleId),
         negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+        provider: imageProvider,
+        model: selectedImageModel(),
+        kind: "cover",
+        label: documentTitle,
+        aspectRatio: "2:3",
       });
-      if (!job.promptId) {
-        throw new Error(job.message || "ComfyUI gaf geen prompt-id terug.");
-      }
       setCoverStatus("cover rendert...");
-      const status = await pollIllustration(job.promptId);
-      const firstImage = status.images[0];
-      if (!firstImage) {
+      const resolved = await resolveImageJob(job, "cover", documentTitle);
+      if (!resolved.imageUrl) {
         setCoverStatus("Nog geen cover terug.");
         return;
       }
-      const imageUrl = await cacheGeneratedImage(mediaUrl(apiBase, firstImage.url), "cover", documentTitle);
       setBookCover((previous) => ({
         ...previous,
-        imageUrl,
-        jobId: job.promptId,
+        imageUrl: resolved.imageUrl,
+        jobId: resolved.jobId,
       }));
       setCoverStatus("cover klaar en lokaal opgeslagen");
     } catch (error) {
@@ -1097,19 +1229,19 @@ export function App() {
       const job = await generateIllustration(apiBase, {
         prompt: character.prompt,
         negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+        provider: imageProvider,
+        model: selectedImageModel(),
+        kind: "portrait",
+        label: character.name,
+        aspectRatio: "3:4",
       });
-      if (!job.promptId) {
-        throw new Error(job.message || "ComfyUI gaf geen prompt-id terug.");
-      }
-      const status = await pollIllustration(job.promptId);
-      const firstImage = status.images[0];
-      if (!firstImage) {
+      const resolved = await resolveImageJob(job, "portrait", character.name);
+      if (!resolved.imageUrl) {
         setNotice(`Nog geen portret terug voor ${character.name}.`);
         return;
       }
-      const imageUrl = await cacheGeneratedImage(mediaUrl(apiBase, firstImage.url), "portrait", character.name);
       setCharacterPortraits((previous) =>
-        previous.map((item) => (item.id === character.id ? { ...item, imageUrl } : item)),
+        previous.map((item) => (item.id === character.id ? { ...item, imageUrl: resolved.imageUrl } : item)),
       );
       setNotice(`Portret klaar en lokaal opgeslagen voor ${character.name}.`);
     } catch (error) {
@@ -1159,6 +1291,7 @@ export function App() {
         bookCover: savedCover,
         contextAnalysis,
         filmPlan,
+        storyPrompt: storyPromptMeta,
       } satisfies BookProject;
       let librarySaved = false;
       let libraryError = "";
@@ -1201,6 +1334,12 @@ export function App() {
     setCharacterPortraits([]);
     setBookCover({ prompt: "" });
     setCoverStatus("klaar voor cover");
+    setStoryPrompt(initialStoryPromptMeta.prompt);
+    setStoryPromptMeta(initialStoryPromptMeta);
+    setPromptCharacters(initialStoryPromptMeta.characters);
+    setPromptPlot(initialStoryPromptMeta.plot);
+    setPromptMainEvent(initialStoryPromptMeta.mainEvent);
+    setPromptBuilderOpen(false);
     setNotice("");
   }
 
@@ -1222,6 +1361,7 @@ export function App() {
       bookCover,
       contextAnalysis,
       filmPlan,
+      storyPrompt: storyPromptMeta,
     };
   }
 
@@ -1365,6 +1505,34 @@ export function App() {
   async function dropStoryOnCategory(categoryId: string) {
     if (!draggedLibraryStoryId) return;
     await assignLibraryStoryToCategory(draggedLibraryStoryId, categoryId);
+  }
+
+  async function deleteLibraryStory(entry: LibraryProjectSummary) {
+    const ok = window.confirm(`Verhaal "${entry.title}" uit de SQL-bibliotheek verwijderen? Het JSON-bestand op schijf blijft staan.`);
+    if (!ok) return;
+    setLibraryBusy(true);
+    try {
+      await deleteLibraryProject(apiBase, entry.id);
+      if (currentLibraryProjectId === entry.id) {
+        setCurrentLibraryProjectId("");
+      }
+      if (sequelSourceId === entry.id) {
+        clearSequelSource();
+      }
+      setReferenceStoryIds((current) => current.filter((id) => id !== entry.id));
+      setReferenceStoryProjects((current) => {
+        const next = { ...current };
+        delete next[entry.id];
+        return next;
+      });
+      await refreshLibrary(false);
+      await refreshCategories(false);
+      setNotice(`${entry.title} is verwijderd uit SQL.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "SQL-verhaal kon niet worden verwijderd.");
+    } finally {
+      setLibraryBusy(false);
+    }
   }
 
   async function toggleReferenceStory(entry: LibraryProjectSummary) {
@@ -1644,6 +1812,9 @@ export function App() {
                   <button type="button" className="quiet icon-button" onClick={() => void chooseSequelSource(entry.id)} title="Maak vervolg op dit verhaal">
                     <ArrowRight size={15} />
                   </button>
+                  <button type="button" className="quiet icon-button" onClick={() => void deleteLibraryStory(entry)} disabled={libraryBusy} title="Verwijder uit SQL">
+                    <Trash2 size={15} />
+                  </button>
                 </article>
               ))}
               {!selectedCategoryId ? localStoryEntries.map((entry) => (
@@ -1714,9 +1885,23 @@ export function App() {
           </label>
 
           <div className="button-row">
+            <label className="field compact-field">
+              <span>Hoofdstukken</span>
+              <select value={chapterTargetCount} onChange={(event) => setChapterTargetCount(Number(event.target.value))}>
+                {[4, 6, 8, 10, 12, 16, 20, 24, 32].map((count) => (
+                  <option value={count} key={count}>
+                    {count}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button type="button" onClick={refreshFromText}>
               <Clipboard size={16} />
               <span>Verdeel</span>
+            </button>
+            <button type="button" className="quiet" onClick={() => void repartitionStoryWithAi()} disabled={chapteringBusy || !rawText.trim()}>
+              {chapteringBusy ? <Loader2 size={16} /> : <Wand2 size={16} />}
+              <span>{chapteringBusy ? "Verdeelt..." : "AI hoofdstukken"}</span>
             </button>
             <button type="button" className="quiet" onClick={() => fileInputRef.current?.click()}>
               <FolderOpen size={16} />
@@ -1731,6 +1916,7 @@ export function App() {
               <span>Wis</span>
             </button>
           </div>
+          <p className="voice-style-note">{chapteringStatus}</p>
         </section>
 
         <section className="tool-panel">
@@ -1738,10 +1924,42 @@ export function App() {
             <FileText size={17} />
             <span>Verhaal maken</span>
           </div>
-          <label className="field">
-            <span>Prompt</span>
-            <textarea value={storyPrompt} onChange={(event) => setStoryPrompt(event.target.value)} rows={5} />
-          </label>
+          <button type="button" className="quiet" onClick={() => setPromptBuilderOpen((open) => !open)}>
+            <Sparkles size={16} />
+            <span>{storyPrompt.trim() ? "Prompt bekijken / aanpassen" : "Prompt maken"}</span>
+          </button>
+          {storyPrompt.trim() ? (
+            <div className="context-brief">
+              <small>Saved prompt</small>
+              <p>{storyPrompt}</p>
+            </div>
+          ) : null}
+          {promptBuilderOpen ? (
+            <div className="context-brief">
+              <label className="field">
+                <span>What are the characters? (name / age / gender)</span>
+                <textarea value={promptCharacters} onChange={(event) => setPromptCharacters(event.target.value)} rows={3} />
+              </label>
+              <label className="field">
+                <span>What is the plot?</span>
+                <textarea value={promptPlot} onChange={(event) => setPromptPlot(event.target.value)} rows={4} />
+              </label>
+              <label className="field">
+                <span>What is the main event to be focused on?</span>
+                <textarea value={promptMainEvent} onChange={(event) => setPromptMainEvent(event.target.value)} rows={3} />
+              </label>
+              <div className="button-row">
+                <button type="button" onClick={saveGuidedPrompt}>
+                  <Save size={16} />
+                  <span>Save prompt</span>
+                </button>
+                <button type="button" className="quiet" onClick={() => setPromptBuilderOpen(false)}>
+                  <Trash2 size={16} />
+                  <span>Close</span>
+                </button>
+              </div>
+            </div>
+          ) : null}
           <label className="field">
             <span>Vervolg op</span>
             <select value={sequelSourceId} onChange={(event) => void chooseSequelSource(event.target.value)} disabled={libraryBusy || !libraryStories.length}>
@@ -2053,7 +2271,8 @@ export function App() {
             <small>
               {apiHealth?.tts?.voices?.length ?? 0} Piper-stemmen, snel {apiHealth?.context?.model || "onbekend"}, diep{" "}
               {apiHealth?.context?.deepModel || "onbekend"}, DeepSeek {apiHealth?.deepseekApi?.configured ? apiHealth.deepseekApi.storyModel : "geen key"}, Grok{" "}
-              {apiHealth?.xaiApi?.configured ? apiHealth.xaiApi.filmModel : "geen key"},{" "}
+              {apiHealth?.xaiApi?.configured ? apiHealth.xaiApi.filmModel : "geen key"}, Grok beeld{" "}
+              {apiHealth?.xaiApi?.configured ? apiHealth.xaiApi.imageModel || "standaard" : "geen key"},{" "}
               {apiHealth?.storage?.audioFiles ?? 0} audiofiles, {apiHealth?.storage?.imageFiles ?? 0} beelden
             </small>
             <small>{modelCatalogStatus}</small>
@@ -2139,6 +2358,35 @@ export function App() {
               ))}
             </select>
           </label>
+          <div className="button-row">
+            <label className="field compact-field">
+              <span>Beeldmaker</span>
+              <select value={imageProvider} onChange={(event) => setImageProvider(event.target.value as ImageProvider)}>
+                <option value="comfy">ComfyUI lokaal</option>
+                <option value="grok">Grok Imagine</option>
+              </select>
+            </label>
+            {imageProvider === "grok" ? (
+              <label className="field compact-field model-field">
+                <span>Grok beeldmodel</span>
+                <select
+                  value={selectedGrokImageModel}
+                  onChange={(event) => setSelectedGrokImageModel(event.target.value)}
+                  disabled={!grokImageModelOptions.length && !selectedGrokImageModel}
+                >
+                  {grokImageModelOptions.length ? (
+                    grokImageModelOptions.map((model) => (
+                      <option value={model.id} key={model.id}>
+                        {model.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">Geen beeldmodellen gevonden</option>
+                  )}
+                </select>
+              </label>
+            ) : null}
+          </div>
           <button type="button" className="quiet" onClick={() => void runDeepSeekContextAnalysis("fast")} disabled={contextBusy || !rawText.trim()}>
             {contextBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
             <span>{contextBusy ? "Analyseert..." : "Snelle context"}</span>
@@ -2367,6 +2615,30 @@ function responseProviderLabel(provider: string): string {
   return "fallback";
 }
 
+function imageProviderLabel(provider: ImageProvider): string {
+  return provider === "grok" ? "Grok Imagine" : "ComfyUI";
+}
+
+function buildGuidedStoryPrompt(characters: string, plot: string, mainEvent: string): StoryPromptMeta {
+  const cleanCharacters = characters.trim();
+  const cleanPlot = plot.trim();
+  const cleanMainEvent = mainEvent.trim();
+  const prompt = [
+    "Write a complete, emotionally coherent personal story based on this brief.",
+    `Characters (name / age / gender): ${cleanCharacters || "not specified"}.`,
+    `Plot: ${cleanPlot || "not specified"}.`,
+    `Main event to focus on: ${cleanMainEvent || "not specified"}.`,
+    "Keep the characters consistent, make the scenes concrete, and build the story around the main event without rushing past it.",
+  ].join("\n");
+  return {
+    characters: cleanCharacters,
+    plot: cleanPlot,
+    mainEvent: cleanMainEvent,
+    prompt,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 function withSelectedModel(options: ModelOption[], selectedId: string): ModelOption[] {
   const normalized = options.filter((model) => model.id);
   if (!selectedId || normalized.some((model) => model.id === selectedId)) {
@@ -2488,6 +2760,7 @@ function lightweightProject(project: BookProject, savedAt: string): BookProject 
       : undefined,
     contextAnalysis: project.contextAnalysis,
     filmPlan: project.filmPlan,
+    storyPrompt: project.storyPrompt,
   };
 }
 

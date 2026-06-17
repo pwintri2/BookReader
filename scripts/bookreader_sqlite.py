@@ -27,7 +27,7 @@ WORD_PATTERN = re.compile(r"\b[\wÀ-ÿ'-]+\b", re.UNICODE)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="BookReader SQLite library")
-    parser.add_argument("command", choices=["init", "import", "list", "open", "save", "categories", "create-category", "assign-category"])
+    parser.add_argument("command", choices=["init", "import", "list", "open", "save", "delete", "categories", "create-category", "assign-category"])
     parser.add_argument("--db", required=True, help="SQLite database path")
     parser.add_argument("--path", action="append", default=[], help="File or directory to import")
     parser.add_argument("--id", default="", help="Project id for open")
@@ -42,6 +42,7 @@ def main() -> int:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
             ensure_schema(conn)
             if args.command == "init":
                 result = {"ok": True, "dbPath": str(db_path)}
@@ -56,6 +57,10 @@ def main() -> int:
                 payload = json.loads(sys.stdin.read() or "{}")
                 result = save_payload_project(conn, payload)
                 result["dbPath"] = str(db_path)
+            elif args.command == "delete":
+                result = delete_project(conn, args.id)
+                result["dbPath"] = str(db_path)
+                conn.commit()
             elif args.command == "categories":
                 result = {"ok": True, "dbPath": str(db_path), "categories": list_categories(conn)}
             elif args.command == "create-category":
@@ -210,6 +215,7 @@ def normalize_project(project: dict[str, Any], fallback_saved_at: str | None = N
         "bookCover": project.get("bookCover") if isinstance(project.get("bookCover"), dict) else None,
         "contextAnalysis": project.get("contextAnalysis"),
         "filmPlan": project.get("filmPlan"),
+        "storyPrompt": project.get("storyPrompt") if isinstance(project.get("storyPrompt"), dict) else None,
     }
 
 
@@ -336,6 +342,15 @@ def open_project(conn: sqlite3.Connection, project_id: str) -> dict[str, Any]:
     summary = summary_from_row(row)
     attach_categories(conn, [summary])
     return {"ok": True, "project": json.loads(row["project_json"]), "summary": summary}
+
+
+def delete_project(conn: sqlite3.Connection, project_id: str) -> dict[str, Any]:
+    summary = project_summary_by_id(conn, project_id)
+    if not summary:
+        return {"ok": False, "error": "project_not_found"}
+    conn.execute("DELETE FROM project_categories WHERE project_id = ?", (project_id,))
+    conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    return {"ok": True, "project": summary, "categories": list_categories(conn)}
 
 
 def list_categories(conn: sqlite3.Connection) -> list[dict[str, Any]]:
