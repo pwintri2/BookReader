@@ -56,6 +56,7 @@ import {
   ProjectFileSummary,
   saveDeepSeekApiKey,
   saveLibraryProject,
+  saveXaiApiKey,
   synthesizeSpeech,
 } from "./lib/bookreaderApi";
 import {
@@ -210,8 +211,11 @@ export function App() {
   const [modelCatalogBusy, setModelCatalogBusy] = useState(false);
   const [selectedLocalModel, setSelectedLocalModel] = useState("");
   const [selectedApiModel, setSelectedApiModel] = useState("");
+  const [selectedGrokModel, setSelectedGrokModel] = useState("");
   const [deepSeekApiKeyInput, setDeepSeekApiKeyInput] = useState("");
   const [deepSeekKeyBusy, setDeepSeekKeyBusy] = useState(false);
+  const [xaiApiKeyInput, setXaiApiKeyInput] = useState("");
+  const [xaiKeyBusy, setXaiKeyBusy] = useState(false);
   const [illustrationStyleId, setIllustrationStyleId] = useState<IllustrationStyleId>("storybook");
   const [illustrationPrompt, setIllustrationPrompt] = useState("");
   const [illustrationStatus, setIllustrationStatus] = useState("geen illustratie");
@@ -311,16 +315,23 @@ export function App() {
   const selectedVoice = voices.find((voice) => voice.voiceURI === voiceURI) || voices[0];
   const selectedVoiceStyle = VOICE_STYLES.find((style) => style.id === voiceStyleId) || VOICE_STYLES[0];
   const apiOnline = apiHealth?.ok === true;
+  const normalizedAiProvider = normalizeAiProvider(aiProvider);
   const localModelOptions = useMemo(
     () => withSelectedModel(modelCatalog?.ollama.models || [], selectedLocalModel),
     [modelCatalog?.ollama.models, selectedLocalModel],
   );
-  const apiModelOptions = useMemo(
+  const deepseekModelOptions = useMemo(
     () => withSelectedModel(modelCatalog?.deepseekApi.models || [], selectedApiModel),
     [modelCatalog?.deepseekApi.models, selectedApiModel],
   );
-  const activeModelOptions = aiProvider === "api" ? apiModelOptions : localModelOptions;
-  const selectedAiModel = aiProvider === "api" ? selectedApiModel : selectedLocalModel;
+  const grokModelOptions = useMemo(
+    () => withSelectedModel(modelCatalog?.xaiApi.models || [], selectedGrokModel),
+    [modelCatalog?.xaiApi.models, selectedGrokModel],
+  );
+  const activeModelOptions =
+    normalizedAiProvider === "deepseek" ? deepseekModelOptions : normalizedAiProvider === "grok" ? grokModelOptions : localModelOptions;
+  const selectedAiModel =
+    normalizedAiProvider === "deepseek" ? selectedApiModel : normalizedAiProvider === "grok" ? selectedGrokModel : selectedLocalModel;
   const activeModelLabel = modelOptionLabel(activeModelOptions, selectedAiModel) || selectedAiModel || "standaardmodel";
 
   useEffect(() => {
@@ -508,13 +519,58 @@ export function App() {
     return { title, text };
   }
 
+  async function saveUploadedReferenceToDatabase() {
+    if (!referenceText.trim()) {
+      setNotice("Laad eerst een referentiebestand.");
+      return;
+    }
+    setLibraryBusy(true);
+    try {
+      const savedAt = new Date().toISOString();
+      const title = referenceTitle.trim() || `Referentie ${formatSavedAt(savedAt)}`;
+      const parsedReference = splitIntoChapters(referenceText);
+      const project = {
+        schema: "bookreader.project.v1",
+        savedAt,
+        title,
+        rawText: referenceText,
+        illustrationStyleId,
+        chapterIllustrations: [],
+        characterPortraits: [],
+        bookCover: { prompt: buildCoverPrompt(title, parsedReference.chapters, illustrationStyleId) },
+      } satisfies BookProject;
+      const category = await createLibraryCategory(apiBase, "Referenties");
+      const saved = await saveLibraryProject(apiBase, project, [category.category.id]);
+      saveStoryToLibrary(project);
+      setReferenceStoryProjects((current) => ({
+        ...current,
+        [saved.project.id]: {
+          title: saved.project.title,
+          rawText: referenceText,
+        },
+      }));
+      setReferenceStoryIds((current) => (current.includes(saved.project.id) ? current : [...current, saved.project.id]));
+      await refreshLibrary(false);
+      await refreshCategories(false);
+      setAssignCategoryId(category.category.id);
+      setReferenceStatus(`${saved.project.title} opgeslagen in SQL en aangevinkt als referentie`);
+      setNotice(`${saved.project.title} staat in SQL onder Referenties.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Referentie kon niet in SQL worden opgeslagen.";
+      setReferenceStatus(message);
+      setNotice(message);
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
   async function createStoryFromPrompt() {
     if (!storyPrompt.trim()) {
       setNotice("Geef eerst een verhaalprompt.");
       return;
     }
     setStoryBusy(true);
-    const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
+    const providerLabel = aiProviderLabel(aiProvider);
     const presetLabel = storyNarrativePreset === "rich_intro" ? " met veel detail en lange intro" : "";
     const sequelLabel = sequelSourceText ? ` als vervolg op ${sequelSourceTitle || "het gekozen verhaal"}` : "";
     setStoryStatus(
@@ -567,7 +623,7 @@ export function App() {
       } catch {
         libraryNote = "";
       }
-      const responseProvider = response.provider === "deepseek-api" ? "API" : "lokaal";
+      const responseProvider = responseProviderLabel(response.provider);
       const languageNote = response.language ? `, ${response.language}` : "";
       setStoryStatus(`${responseProvider} ${response.model}: ${response.wordCount.toLocaleString("nl-NL")} woorden gemaakt${languageNote}`);
       setNotice(`Verhaal geladen: ${response.title}${libraryNote}.`);
@@ -586,7 +642,7 @@ export function App() {
       return;
     }
     setFilmBusy(true);
-    const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
+    const providerLabel = aiProviderLabel(aiProvider);
     setFilmStatus(`${providerLabel} ${activeModelLabel} maakt een scene breakdown...`);
     setNotice("");
     try {
@@ -601,8 +657,7 @@ export function App() {
         model: selectedAiModel || undefined,
       });
       setFilmPlan(response.plan);
-      const responseProvider =
-        response.provider === "deepseek-api" ? "API" : response.provider === "ollama" ? "lokaal" : "fallback";
+      const responseProvider = responseProviderLabel(response.provider);
       const fallbackNote = response.fallbackUsed ? " + lokale fallback" : "";
       setFilmStatus(
         `${responseProvider} ${response.model} (${response.mode})${fallbackNote}: ${response.plan.scenes.length} scènes, ${formatDuration(
@@ -770,8 +825,9 @@ export function App() {
       }
       const ttsLabel = health.tts?.configured ? "TTS aan" : "TTS uit";
       const comfyLabel = health.comfy?.workflowConfigured ? "Comfy workflow aan" : "Comfy workflow uit";
-      const apiLabel = health.deepseekApi?.configured ? "DeepSeek API aan" : "DeepSeek API key ontbreekt";
-      setApiStatus(`${ttsLabel}, ${comfyLabel}, ${apiLabel}`);
+      const deepseekLabel = health.deepseekApi?.configured ? "DeepSeek API aan" : "DeepSeek key ontbreekt";
+      const grokLabel = health.xaiApi?.configured ? "Grok API aan" : "Grok key ontbreekt";
+      setApiStatus(`${ttsLabel}, ${comfyLabel}, ${deepseekLabel}, ${grokLabel}`);
       if (showNotice) setNotice("Serverlaag bereikt.");
     } catch (error) {
       setApiHealth(null);
@@ -796,12 +852,18 @@ export function App() {
         ]),
       );
       setSelectedApiModel((current) => chooseCatalogModel(current, catalog.deepseekApi.models, [catalog.defaults.api.story, catalog.defaults.api.context]));
+      setSelectedGrokModel((current) => chooseCatalogModel(current, catalog.xaiApi.models, [catalog.defaults.xai.film, catalog.defaults.xai.story, catalog.defaults.xai.context]));
       const ollamaLabel = catalog.ollama.models.length ? `${catalog.ollama.models.length} Ollama` : "geen Ollama";
-      const apiLabel = catalog.deepseekApi.models.length ? `${catalog.deepseekApi.models.length} DeepSeek API` : "geen DeepSeek API";
-      const warning = [catalog.ollama.error ? "Ollama lijst niet live" : "", catalog.deepseekApi.error ? "DeepSeek lijst fallback" : ""]
+      const deepseekLabel = catalog.deepseekApi.models.length ? `${catalog.deepseekApi.models.length} DeepSeek API` : "geen DeepSeek API";
+      const grokLabel = catalog.xaiApi.models.length ? `${catalog.xaiApi.models.length} Grok API` : "geen Grok API";
+      const warning = [
+        catalog.ollama.error ? "Ollama lijst niet live" : "",
+        catalog.deepseekApi.error ? "DeepSeek lijst fallback" : "",
+        catalog.xaiApi.error ? "Grok lijst fallback" : "",
+      ]
         .filter(Boolean)
         .join(", ");
-      setModelCatalogStatus(warning ? `${ollamaLabel}, ${apiLabel} (${warning})` : `${ollamaLabel}, ${apiLabel}`);
+      setModelCatalogStatus(warning ? `${ollamaLabel}, ${deepseekLabel}, ${grokLabel} (${warning})` : `${ollamaLabel}, ${deepseekLabel}, ${grokLabel}`);
       if (showNotice) setNotice("Modellenlijst bijgewerkt.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Modellenlijst kon niet worden geladen.";
@@ -838,7 +900,7 @@ export function App() {
     try {
       const response = await saveDeepSeekApiKey(apiBase, "", true);
       setDeepSeekApiKeyInput("");
-      setAiProvider("local");
+      if (normalizeAiProvider(aiProvider) === "deepseek") setAiProvider("local");
       setNotice(response.message || "DeepSeek API key is gewist.");
       await refreshApiHealth(false);
       await refreshModelCatalog(false);
@@ -847,6 +909,44 @@ export function App() {
       setNotice(message);
     } finally {
       setDeepSeekKeyBusy(false);
+    }
+  }
+
+  async function saveXaiKey() {
+    const apiKey = xaiApiKeyInput.trim();
+    if (!apiKey) {
+      setNotice("Plak eerst een Grok/xAI API key.");
+      return;
+    }
+    setXaiKeyBusy(true);
+    try {
+      const response = await saveXaiApiKey(apiBase, apiKey);
+      setXaiApiKeyInput("");
+      setNotice(response.message || "Grok API key is opgeslagen.");
+      await refreshApiHealth(false);
+      await refreshModelCatalog(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Grok API key kon niet worden opgeslagen.";
+      setNotice(message);
+    } finally {
+      setXaiKeyBusy(false);
+    }
+  }
+
+  async function clearXaiKey() {
+    setXaiKeyBusy(true);
+    try {
+      const response = await saveXaiApiKey(apiBase, "", true);
+      setXaiApiKeyInput("");
+      if (normalizeAiProvider(aiProvider) === "grok") setAiProvider("local");
+      setNotice(response.message || "Grok API key is gewist.");
+      await refreshApiHealth(false);
+      await refreshModelCatalog(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Grok API key kon niet worden gewist.";
+      setNotice(message);
+    } finally {
+      setXaiKeyBusy(false);
     }
   }
 
@@ -917,7 +1017,7 @@ export function App() {
       return;
     }
     setContextBusy(true);
-    const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
+    const providerLabel = aiProviderLabel(aiProvider);
     setContextStatus(
       mode === "deep"
         ? `${providerLabel} ${activeModelLabel} doet diepe verhaalcontext...`
@@ -945,9 +1045,9 @@ export function App() {
       }
       const fallbackNote = response.fallbackUsed ? " + lokale kwaliteitsfallback" : "";
       const modeLabel = response.mode === "deep" ? "diep" : "snel";
-      const responseProvider = response.provider === "deepseek-api" ? "API" : "lokaal";
-      setContextStatus(`DeepSeek ${responseProvider} ${response.model} (${modeLabel})${fallbackNote}: ${analysis.characters.length} karakter(s), context toegepast`);
-      setNotice(response.warning || "DeepSeek-context toegepast op prompts, cover en portretten.");
+      const responseProvider = responseProviderLabel(response.provider);
+      setContextStatus(`${responseProvider} ${response.model} (${modeLabel})${fallbackNote}: ${analysis.characters.length} karakter(s), context toegepast`);
+      setNotice(response.warning || "AI-context toegepast op prompts, cover en portretten.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "DeepSeek-contextanalyse is mislukt.";
       setContextStatus(message);
@@ -1687,6 +1787,10 @@ export function App() {
               <FolderOpen size={16} />
               <span>Referentie</span>
             </button>
+            <button type="button" className="quiet" onClick={() => void saveUploadedReferenceToDatabase()} disabled={libraryBusy || !referenceText.trim()}>
+              {libraryBusy ? <Loader2 size={16} /> : <Save size={16} />}
+              <span>Bewaar ref</span>
+            </button>
             <button
               type="button"
               className="quiet"
@@ -1757,16 +1861,19 @@ export function App() {
               <span>AI-bron</span>
               <select value={aiProvider} onChange={(event) => setAiProvider(event.target.value as AiProvider)}>
                 <option value="local">Lokale Ollama</option>
-                <option value="api">DeepSeek API</option>
+                <option value="deepseek">DeepSeek API</option>
+                <option value="grok">Grok API</option>
               </select>
             </label>
             <label className="field compact-field model-field">
-              <span>{aiProvider === "api" ? "DeepSeek model" : "Ollama model"}</span>
+              <span>{aiProviderModelLabel(aiProvider)}</span>
               <select
                 value={selectedAiModel}
                 onChange={(event) => {
-                  if (aiProvider === "api") {
+                  if (normalizedAiProvider === "deepseek") {
                     setSelectedApiModel(event.target.value);
+                  } else if (normalizedAiProvider === "grok") {
+                    setSelectedGrokModel(event.target.value);
                   } else {
                     setSelectedLocalModel(event.target.value);
                   }
@@ -1837,7 +1944,7 @@ export function App() {
             </label>
           </div>
           <p className="voice-style-note">
-            AI: {aiProvider === "api" ? "DeepSeek API" : "Lokale Ollama"} · {activeModelLabel}
+            AI: {aiProviderLabel(aiProvider)} · {activeModelLabel}
           </p>
           <button type="button" onClick={() => void createFilmPlan()} disabled={filmBusy || !rawText.trim()}>
             {filmBusy ? <Loader2 size={16} /> : <Film size={16} />}
@@ -1916,6 +2023,27 @@ export function App() {
               <span>Wis key</span>
             </button>
           </div>
+          <label className="field">
+            <span>Grok API key</span>
+            <input
+              type="password"
+              value={xaiApiKeyInput}
+              onChange={(event) => setXaiApiKeyInput(event.target.value)}
+              placeholder={apiHealth?.xaiApi?.configured ? "opgeslagen" : "xai-..."}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <div className="button-row">
+            <button type="button" className="quiet" onClick={() => void saveXaiKey()} disabled={xaiKeyBusy || !xaiApiKeyInput.trim()}>
+              {xaiKeyBusy ? <Loader2 size={16} /> : <Save size={16} />}
+              <span>Grok key opslaan</span>
+            </button>
+            <button type="button" className="quiet" onClick={() => void clearXaiKey()} disabled={xaiKeyBusy || !apiHealth?.xaiApi?.configured}>
+              <Trash2 size={16} />
+              <span>Wis Grok key</span>
+            </button>
+          </div>
           <button type="button" className="quiet" onClick={() => void refreshApiHealth(true)} disabled={apiBusy}>
             {apiBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
             <span>Status</span>
@@ -1924,7 +2052,8 @@ export function App() {
             <span>{apiStatus}</span>
             <small>
               {apiHealth?.tts?.voices?.length ?? 0} Piper-stemmen, snel {apiHealth?.context?.model || "onbekend"}, diep{" "}
-              {apiHealth?.context?.deepModel || "onbekend"}, API {apiHealth?.deepseekApi?.configured ? apiHealth.deepseekApi.storyModel : "geen key"},{" "}
+              {apiHealth?.context?.deepModel || "onbekend"}, DeepSeek {apiHealth?.deepseekApi?.configured ? apiHealth.deepseekApi.storyModel : "geen key"}, Grok{" "}
+              {apiHealth?.xaiApi?.configured ? apiHealth.xaiApi.filmModel : "geen key"},{" "}
               {apiHealth?.storage?.audioFiles ?? 0} audiofiles, {apiHealth?.storage?.imageFiles ?? 0} beelden
             </small>
             <small>{modelCatalogStatus}</small>
@@ -2016,7 +2145,7 @@ export function App() {
           </button>
           <button type="button" className="quiet" onClick={() => void runDeepSeekContextAnalysis("deep")} disabled={contextBusy || !rawText.trim()}>
             {contextBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
-            <span>{aiProvider === "api" ? "Diepe context API" : "Diepe context"}</span>
+            <span>{normalizeAiProvider(aiProvider) === "local" ? "Diepe context" : "Diepe context API"}</span>
           </button>
           <p className="voice-style-note">{contextStatus}</p>
           <label className="field">
@@ -2209,6 +2338,33 @@ export function App() {
       </aside>
     </main>
   );
+}
+
+function normalizeAiProvider(provider: AiProvider): "local" | "deepseek" | "grok" {
+  if (provider === "api" || provider === "deepseek") return "deepseek";
+  if (provider === "grok") return "grok";
+  return "local";
+}
+
+function aiProviderLabel(provider: AiProvider): string {
+  const normalized = normalizeAiProvider(provider);
+  if (normalized === "deepseek") return "DeepSeek API";
+  if (normalized === "grok") return "Grok API";
+  return "Lokale Ollama";
+}
+
+function aiProviderModelLabel(provider: AiProvider): string {
+  const normalized = normalizeAiProvider(provider);
+  if (normalized === "deepseek") return "DeepSeek model";
+  if (normalized === "grok") return "Grok model";
+  return "Ollama model";
+}
+
+function responseProviderLabel(provider: string): string {
+  if (provider === "deepseek-api") return "DeepSeek API";
+  if (provider === "xai-api") return "Grok API";
+  if (provider === "ollama") return "lokaal";
+  return "fallback";
 }
 
 function withSelectedModel(options: ModelOption[], selectedId: string): ModelOption[] {

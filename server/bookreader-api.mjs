@@ -34,11 +34,22 @@ let DEEPSEEK_API_KEY = process.env.BOOKREADER_DEEPSEEK_API_KEY || "";
 const DEEPSEEK_API_BASE_URL = normalizeBaseUrl(process.env.BOOKREADER_DEEPSEEK_API_BASE_URL || "https://api.deepseek.com");
 const DEEPSEEK_API_CONTEXT_MODEL = process.env.BOOKREADER_DEEPSEEK_API_CONTEXT_MODEL || "deepseek-v4-flash";
 const DEEPSEEK_API_STORY_MODEL = process.env.BOOKREADER_DEEPSEEK_API_STORY_MODEL || "deepseek-v4-flash";
+const DEEPSEEK_API_FILM_MODEL = process.env.BOOKREADER_DEEPSEEK_API_FILM_MODEL || DEEPSEEK_API_STORY_MODEL;
 const DEEPSEEK_API_MODEL_OPTIONS = [
   { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
   { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
   { id: "deepseek-chat", label: "DeepSeek Chat (legacy)" },
   { id: "deepseek-reasoner", label: "DeepSeek Reasoner (legacy)" },
+];
+let XAI_API_KEY = process.env.BOOKREADER_XAI_API_KEY || process.env.XAI_API_KEY || "";
+const XAI_API_BASE_URL = normalizeBaseUrl(process.env.BOOKREADER_XAI_API_BASE_URL || "https://api.x.ai");
+const XAI_API_CONTEXT_MODEL = process.env.BOOKREADER_XAI_API_CONTEXT_MODEL || "grok-4.3";
+const XAI_API_STORY_MODEL = process.env.BOOKREADER_XAI_API_STORY_MODEL || "grok-4.3";
+const XAI_API_FILM_MODEL = process.env.BOOKREADER_XAI_API_FILM_MODEL || XAI_API_STORY_MODEL;
+const XAI_API_MODEL_OPTIONS = [
+  { id: "grok-4.3", label: "Grok 4.3" },
+  { id: "grok-4.20", label: "Grok 4.20" },
+  { id: "grok-build-0.1", label: "Grok Build 0.1" },
 ];
 const MAX_CONTEXT_CHARS = Number(process.env.BOOKREADER_CONTEXT_MAX_CHARS || 18000);
 const REFERENCE_MAX_CHARS = Number(process.env.BOOKREADER_REFERENCE_MAX_CHARS || 60000);
@@ -376,6 +387,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/settings/xai-key") {
+      await handleXaiKeySave(req, res);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/media/cache-image") {
       await handleCacheImage(req, res);
       return;
@@ -461,6 +477,14 @@ function healthPayload() {
       baseUrl: DEEPSEEK_API_BASE_URL,
       contextModel: DEEPSEEK_API_CONTEXT_MODEL,
       storyModel: DEEPSEEK_API_STORY_MODEL,
+      filmModel: DEEPSEEK_API_FILM_MODEL,
+    },
+    xaiApi: {
+      configured: Boolean(XAI_API_KEY),
+      baseUrl: XAI_API_BASE_URL,
+      contextModel: XAI_API_CONTEXT_MODEL,
+      storyModel: XAI_API_STORY_MODEL,
+      filmModel: XAI_API_FILM_MODEL,
     },
     storage: {
       outputDir: OUTPUT_DIR,
@@ -473,11 +497,12 @@ function healthPayload() {
 }
 
 async function modelCatalogPayload() {
-  const [ollama, deepseekApi] = await Promise.all([ollamaModelCatalog(), deepSeekApiModelCatalog()]);
+  const [ollama, deepseekApi, xaiApi] = await Promise.all([ollamaModelCatalog(), deepSeekApiModelCatalog(), xaiApiModelCatalog()]);
   return {
     ok: true,
     ollama,
     deepseekApi,
+    xaiApi,
     defaults: {
       local: {
         fastContext: CONTEXT_MODEL,
@@ -488,6 +513,12 @@ async function modelCatalogPayload() {
       api: {
         context: DEEPSEEK_API_CONTEXT_MODEL,
         story: DEEPSEEK_API_STORY_MODEL,
+        film: DEEPSEEK_API_FILM_MODEL,
+      },
+      xai: {
+        context: XAI_API_CONTEXT_MODEL,
+        story: XAI_API_STORY_MODEL,
+        film: XAI_API_FILM_MODEL,
       },
     },
   };
@@ -584,6 +615,53 @@ async function deepSeekApiModelCatalog() {
   }
 }
 
+async function xaiApiModelCatalog() {
+  const fallbackModels = normalizeModelOptions(XAI_API_MODEL_OPTIONS);
+  if (!XAI_API_KEY) {
+    return {
+      configured: false,
+      baseUrl: XAI_API_BASE_URL,
+      models: fallbackModels,
+    };
+  }
+
+  try {
+    const response = await fetch(apiUrl(XAI_API_BASE_URL, "/v1/models"), {
+      headers: {
+        Authorization: `Bearer ${XAI_API_KEY}`,
+      },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        configured: true,
+        baseUrl: XAI_API_BASE_URL,
+        models: fallbackModels,
+        error: `xai_models_http_${response.status}`,
+      };
+    }
+
+    const liveModels = Array.isArray(payload.data)
+      ? payload.data.map((item) => ({
+          id: String(item.id || "").trim(),
+          label: String(item.id || "").trim(),
+        }))
+      : [];
+    return {
+      configured: true,
+      baseUrl: XAI_API_BASE_URL,
+      models: mergeModelOptions(fallbackModels, liveModels),
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      baseUrl: XAI_API_BASE_URL,
+      models: fallbackModels,
+      error: error instanceof Error && error.message ? error.message : "xai_models_unreachable",
+    };
+  }
+}
+
 function mergeModelOptions(primary, secondary) {
   return normalizeModelOptions([...primary, ...secondary]);
 }
@@ -612,6 +690,32 @@ function sanitizeModelName(value) {
 
 function selectRequestModel(requestedModel, fallbackModel) {
   return sanitizeModelName(requestedModel) || fallbackModel;
+}
+
+function normalizeAiProvider(value) {
+  const provider = String(value || "").trim().toLowerCase();
+  if (provider === "grok" || provider === "xai" || provider === "xai-api") return "grok";
+  if (provider === "api" || provider === "deepseek" || provider === "deepseek-api") return "deepseek";
+  return "local";
+}
+
+function apiDefaultModel(provider, purpose) {
+  if (provider === "grok") {
+    if (purpose === "context") return XAI_API_CONTEXT_MODEL;
+    if (purpose === "film") return XAI_API_FILM_MODEL;
+    return XAI_API_STORY_MODEL;
+  }
+  if (purpose === "context") return DEEPSEEK_API_CONTEXT_MODEL;
+  if (purpose === "film") return DEEPSEEK_API_FILM_MODEL;
+  return DEEPSEEK_API_STORY_MODEL;
+}
+
+function apiProviderLabel(provider) {
+  return provider === "grok" ? "Grok API" : "DeepSeek API";
+}
+
+function apiResponseProvider(provider) {
+  return provider === "grok" ? "xai-api" : "deepseek-api";
 }
 
 async function handleProjectList(res) {
@@ -879,12 +983,13 @@ async function handleContextAnalyze(req, res) {
   const chapterText = String(body.chapterText || "");
   const style = String(body.style || "storybook");
   const mode = body.mode === "deep" ? "deep" : "fast";
-  const provider = body.provider === "api" ? "api" : "local";
+  const provider = normalizeAiProvider(body.provider);
   const localModel = mode === "deep" ? DEEP_CONTEXT_MODEL : CONTEXT_MODEL;
-  const defaultModel = provider === "api" ? DEEPSEEK_API_CONTEXT_MODEL : localModel;
+  const defaultModel = provider === "local" ? localModel : apiDefaultModel(provider, "context");
   const model = selectRequestModel(body.model, defaultModel);
   const timeoutMs = mode === "deep" ? DEEP_CONTEXT_TIMEOUT_MS : CONTEXT_TIMEOUT_MS;
   const maxContextChars = mode === "deep" ? Math.max(MAX_CONTEXT_CHARS, 36000) : MAX_CONTEXT_CHARS;
+  const providerLabel = provider === "local" ? "DeepSeek" : apiProviderLabel(provider);
 
   if (!rawText.trim() && !chapterText.trim()) {
     await sendJson(res, 400, { ok: false, error: "empty_text" });
@@ -907,8 +1012,9 @@ async function handleContextAnalyze(req, res) {
     fallbackAnalysis,
   });
 
-  if (provider === "api") {
+  if (provider !== "local") {
     const apiResult = await runDeepSeekApiChat({
+      apiProvider: provider,
       res,
       model,
       messages: [
@@ -923,9 +1029,9 @@ async function handleContextAnalyze(req, res) {
       responseFormat: { type: "json_object" },
       timeoutMs,
       timeoutError: "context_model_timeout",
-      timeoutMessage: `DeepSeek API-contextanalyse duurde langer dan ${timeoutMs} ms. Probeer een korter hoofdstuk of het snelle model.`,
+      timeoutMessage: `${providerLabel}-contextanalyse duurde langer dan ${timeoutMs} ms. Probeer een korter hoofdstuk of het snelle model.`,
       unreachableError: "context_model_unreachable",
-      unreachableMessage: "DeepSeek API kon niet worden bereikt voor contextanalyse.",
+      unreachableMessage: `${providerLabel} kon niet worden bereikt voor contextanalyse.`,
       failureError: "context_model_failed",
     });
     if (apiResult.clientClosed) return;
@@ -938,12 +1044,12 @@ async function handleContextAnalyze(req, res) {
     if (!parsed) {
       await sendJson(res, 200, {
         ok: true,
-        provider: "deepseek-api",
+        provider: apiResponseProvider(provider),
         model,
         mode,
         fallbackUsed: true,
         fallbackReasons: ["context_json_parse_failed"],
-        warning: "DeepSeek API gaf geen geldige JSON terug; lokale contextfallback gebruikt.",
+        warning: `${providerLabel} gaf geen geldige JSON terug; lokale contextfallback gebruikt.`,
         analysis: fallbackAnalysis,
         preview: String(apiResult.content || "").slice(0, 1200),
       });
@@ -953,7 +1059,7 @@ async function handleContextAnalyze(req, res) {
     const merged = mergeContextAnalysis(normalizeContextAnalysis(parsed), fallbackAnalysis);
     await sendJson(res, 200, {
       ok: true,
-      provider: "deepseek-api",
+      provider: apiResponseProvider(provider),
       model,
       mode,
       fallbackUsed: merged.fallbackUsed,
@@ -1052,12 +1158,13 @@ async function handleStoryGenerate(req, res) {
   const body = await readJson(req);
   const prompt = String(body.prompt || "").trim();
   const mode = body.mode === "deep" ? "deep" : "fast";
-  const provider = body.provider === "api" ? "api" : "local";
+  const provider = normalizeAiProvider(body.provider);
   const narrativePreset = body.narrativePreset === "rich_intro" ? "rich_intro" : "balanced";
   const localModel = mode === "deep" ? DEEP_STORY_MODEL : STORY_MODEL;
-  const defaultModel = provider === "api" ? DEEPSEEK_API_STORY_MODEL : localModel;
+  const defaultModel = provider === "local" ? localModel : apiDefaultModel(provider, "story");
   const model = selectRequestModel(body.model, defaultModel);
   const timeoutMs = mode === "deep" ? DEEP_STORY_TIMEOUT_MS : STORY_TIMEOUT_MS;
+  const providerLabel = provider === "local" ? "DeepSeek" : apiProviderLabel(provider);
   const pages = clampNumber(Number(body.pages || (narrativePreset === "rich_intro" ? 6 : 4)), narrativePreset === "rich_intro" ? 4 : 1, mode === "deep" ? 24 : 12);
   const wordsPerPage = clampNumber(Number(body.wordsPerPage || (narrativePreset === "rich_intro" ? 750 : 550)), narrativePreset === "rich_intro" ? 650 : 180, 1000);
   const genre = String(body.genre || "avontuurlijk verhaal").slice(0, 160);
@@ -1097,8 +1204,9 @@ async function handleStoryGenerate(req, res) {
     sequelGuide,
   });
 
-  if (provider === "api") {
+  if (provider !== "local") {
     const apiResult = await runDeepSeekApiChat({
+      apiProvider: provider,
       res,
       model,
       messages: [
@@ -1112,9 +1220,9 @@ async function handleStoryGenerate(req, res) {
       maxTokens: Math.min(64000, Math.max(mode === "deep" ? 2800 : 1400, Math.round(targetWords * 2.25))),
       timeoutMs,
       timeoutError: "story_model_timeout",
-      timeoutMessage: `DeepSeek API-verhaalgeneratie duurde langer dan ${timeoutMs} ms. Probeer minder pagina's of het snelle model.`,
+      timeoutMessage: `${providerLabel}-verhaalgeneratie duurde langer dan ${timeoutMs} ms. Probeer minder pagina's of het snelle model.`,
       unreachableError: "story_model_unreachable",
-      unreachableMessage: "DeepSeek API kon niet worden bereikt voor verhaalgeneratie.",
+      unreachableMessage: `${providerLabel} kon niet worden bereikt voor verhaalgeneratie.`,
       failureError: "story_model_failed",
     });
     if (apiResult.clientClosed) return;
@@ -1141,7 +1249,7 @@ async function handleStoryGenerate(req, res) {
         message: quality.message,
         model,
         mode,
-        provider: "deepseek-api",
+        provider: apiResponseProvider(provider),
         quality,
         preview: story.slice(0, 1400),
       });
@@ -1149,7 +1257,7 @@ async function handleStoryGenerate(req, res) {
     }
     await sendJson(res, 200, {
       ok: true,
-      provider: "deepseek-api",
+      provider: apiResponseProvider(provider),
       model,
       mode,
       title,
@@ -1262,11 +1370,12 @@ async function handleFilmPlan(req, res) {
   const title = String(body.title || "Untitled").slice(0, 220);
   const rawText = normalizeText(body.rawText || "");
   const mode = body.mode === "deep" ? "deep" : "fast";
-  const provider = body.provider === "api" ? "api" : "local";
+  const provider = normalizeAiProvider(body.provider);
   const localModel = mode === "deep" ? DEEP_STORY_MODEL : STORY_MODEL;
-  const defaultModel = provider === "api" ? DEEPSEEK_API_STORY_MODEL : localModel;
+  const defaultModel = provider === "local" ? localModel : apiDefaultModel(provider, "film");
   const model = selectRequestModel(body.model, defaultModel);
   const timeoutMs = mode === "deep" ? DEEP_FILM_TIMEOUT_MS : FILM_TIMEOUT_MS;
+  const providerLabel = provider === "local" ? "DeepSeek" : apiProviderLabel(provider);
   const targetMinutes = clampNumber(Number(body.targetMinutes || 7), 5, 10);
   const sceneCount = clampNumber(Number(body.sceneCount || targetMinutes * 2), 6, 24);
   const style = String(body.style || "cinematic").slice(0, 120);
@@ -1293,8 +1402,9 @@ async function handleFilmPlan(req, res) {
     fallbackPlan,
   });
 
-  if (provider === "api") {
+  if (provider !== "local") {
     const apiResult = await runDeepSeekApiChat({
+      apiProvider: provider,
       res,
       model,
       messages: [
@@ -1309,9 +1419,9 @@ async function handleFilmPlan(req, res) {
       responseFormat: { type: "json_object" },
       timeoutMs,
       timeoutError: "film_model_timeout",
-      timeoutMessage: `DeepSeek API-filmplan duurde langer dan ${timeoutMs} ms. Probeer minder scènes of het snelle model.`,
+      timeoutMessage: `${providerLabel}-filmplan duurde langer dan ${timeoutMs} ms. Probeer minder scènes of het snelle model.`,
       unreachableError: "film_model_unreachable",
-      unreachableMessage: "DeepSeek API kon niet worden bereikt voor het filmplan.",
+      unreachableMessage: `${providerLabel} kon niet worden bereikt voor het filmplan.`,
       failureError: "film_model_failed",
     });
     if (apiResult.clientClosed) return;
@@ -1324,11 +1434,11 @@ async function handleFilmPlan(req, res) {
     if (!parsed) {
       await sendJson(res, 200, {
         ok: true,
-        provider: "deepseek-api",
+        provider: apiResponseProvider(provider),
         model,
         mode,
         fallbackUsed: true,
-        warning: "DeepSeek API gaf geen geldige JSON terug; lokaal filmplan gebruikt.",
+        warning: `${providerLabel} gaf geen geldige JSON terug; lokaal filmplan gebruikt.`,
         plan: fallbackPlan,
         preview: String(apiResult.content || "").slice(0, 1200),
       });
@@ -1337,7 +1447,7 @@ async function handleFilmPlan(req, res) {
 
     await sendJson(res, 200, {
       ok: true,
-      provider: "deepseek-api",
+      provider: apiResponseProvider(provider),
       model,
       mode,
       fallbackUsed: false,
@@ -1466,6 +1576,44 @@ async function handleDeepSeekKeySave(req, res) {
     ok: true,
     configured: true,
     message: "DeepSeek API key is opgeslagen.",
+  });
+}
+
+async function handleXaiKeySave(req, res) {
+  const body = await readJson(req);
+  const clear = body.clear === true;
+  const apiKey = String(body.apiKey || "").trim();
+
+  if (clear || !apiKey) {
+    writeProjectEnvValue("BOOKREADER_XAI_API_KEY", "");
+    delete process.env.BOOKREADER_XAI_API_KEY;
+    delete process.env.XAI_API_KEY;
+    XAI_API_KEY = "";
+    await sendJson(res, 200, {
+      ok: true,
+      configured: false,
+      message: "Grok API key is gewist.",
+    });
+    return;
+  }
+
+  if (!/^[A-Za-z0-9._-]{12,}$/.test(apiKey) || apiKey.length > 500) {
+    await sendJson(res, 400, {
+      ok: false,
+      error: "invalid_xai_api_key",
+      message: "Controleer de Grok/xAI API key en probeer opnieuw.",
+    });
+    return;
+  }
+
+  writeProjectEnvValue("BOOKREADER_XAI_API_KEY", apiKey);
+  process.env.BOOKREADER_XAI_API_KEY = apiKey;
+  XAI_API_KEY = apiKey;
+
+  await sendJson(res, 200, {
+    ok: true,
+    configured: true,
+    message: "Grok API key is opgeslagen.",
   });
 }
 
@@ -1827,6 +1975,7 @@ async function isOllamaModelAvailable(model) {
 }
 
 async function runDeepSeekApiChat({
+  apiProvider = "deepseek",
   res,
   model,
   messages,
@@ -1840,14 +1989,15 @@ async function runDeepSeekApiChat({
   unreachableMessage,
   failureError,
 }) {
-  if (!DEEPSEEK_API_KEY) {
+  const config = apiChatConfig(apiProvider);
+  if (!config.apiKey) {
     return {
       ok: false,
       status: 503,
       payload: {
         ok: false,
-        error: "deepseek_api_key_missing",
-        message: "DeepSeek API is gekozen, maar BOOKREADER_DEEPSEEK_API_KEY staat niet op de server.",
+        error: config.missingError,
+        message: config.missingMessage,
         model,
       },
     };
@@ -1868,17 +2018,17 @@ async function runDeepSeekApiChat({
     max_tokens: maxTokens,
     ...(responseFormat ? { response_format: responseFormat } : {}),
   };
-  if (/^deepseek-v4/i.test(model)) {
+  if (config.id === "deepseek" && /^deepseek-v4/i.test(model)) {
     requestBody.thinking = { type: "disabled" };
   }
 
   let response;
   try {
-    response = await fetch(`${DEEPSEEK_API_BASE_URL}/chat/completions`, {
+    response = await fetch(apiUrl(config.baseUrl, config.chatPath), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
+        Authorization: `Bearer ${config.apiKey}`,
       },
       body: JSON.stringify(requestBody),
       signal: abortController.signal,
@@ -1910,9 +2060,9 @@ async function runDeepSeekApiChat({
       payload: {
         ok: false,
         error: failureError,
-        message: "DeepSeek API gaf een fout terug.",
+        message: `${config.label} gaf een fout terug.`,
         model,
-        details: sanitizeDeepSeekApiError(payload),
+        details: sanitizeProviderApiError(payload),
       },
     };
   }
@@ -1923,7 +2073,30 @@ async function runDeepSeekApiChat({
   };
 }
 
-function sanitizeDeepSeekApiError(payload) {
+function apiChatConfig(provider) {
+  if (provider === "grok") {
+    return {
+      id: "grok",
+      label: "Grok API",
+      apiKey: XAI_API_KEY,
+      baseUrl: XAI_API_BASE_URL,
+      chatPath: "/v1/chat/completions",
+      missingError: "xai_api_key_missing",
+      missingMessage: "Grok API is gekozen, maar BOOKREADER_XAI_API_KEY staat niet op de server.",
+    };
+  }
+  return {
+    id: "deepseek",
+    label: "DeepSeek API",
+    apiKey: DEEPSEEK_API_KEY,
+    baseUrl: DEEPSEEK_API_BASE_URL,
+    chatPath: "/chat/completions",
+    missingError: "deepseek_api_key_missing",
+    missingMessage: "DeepSeek API is gekozen, maar BOOKREADER_DEEPSEEK_API_KEY staat niet op de server.",
+  };
+}
+
+function sanitizeProviderApiError(payload) {
   const error = payload?.error && typeof payload.error === "object" ? payload.error : payload;
   return {
     message: String(error?.message || "").slice(0, 600),
@@ -2118,10 +2291,39 @@ function normalizeFilmScene(scene, fallback, index) {
     dialogue: normalizeStringArray(source.dialogue || base.dialogue).slice(0, 5),
     voiceOver: truncate(source.voiceOver || source.narration || base.voiceOver || "", 600),
     camera: truncate(source.camera || base.camera || "", 360),
-    visualPrompt: truncate(source.visualPrompt || source.videoPrompt || base.visualPrompt || "", 1400),
+    visualPrompt: strengthenFilmVisualPrompt(source.visualPrompt || source.videoPrompt || base.visualPrompt || "", {
+      title,
+      sourceRange: source.sourceRange || base.sourceRange || "",
+      location: source.location || base.location || "",
+      timeOfDay: source.timeOfDay || base.timeOfDay || "",
+      characters: normalizeStringArray(source.characters || base.characters).slice(0, 8),
+      action,
+      camera: source.camera || base.camera || "",
+    }),
     audioPrompt: truncate(source.audioPrompt || base.audioPrompt || "", 600),
     transition: truncate(source.transition || base.transition || "", 120),
   };
+}
+
+function strengthenFilmVisualPrompt(prompt, scene) {
+  const base = normalizeText(prompt);
+  const characters = normalizeStringArray(scene.characters).slice(0, 8);
+  const additions = [
+    "Literal source-accurate story moment, not a poster, not concept art.",
+    scene.sourceRange ? `Source beat: ${toVisualEnglish(scene.sourceRange)}.` : "",
+    scene.location ? `Exact location: ${toVisualEnglish(scene.location)}.` : "",
+    scene.timeOfDay ? `Time of day: ${toVisualEnglish(scene.timeOfDay)}.` : "",
+    characters.length ? `Visible characters only: ${characters.join(", ")}.` : "Do not add visible main characters unless the source scene names or describes them.",
+    scene.action ? `Specific action: ${toVisualEnglish(scene.action)}.` : "",
+    scene.camera ? `Camera: ${toVisualEnglish(scene.camera)}.` : "",
+    "Keep story continuity, faces, clothing hints, objects and mood consistent; no unrelated landscapes, crowds, readable text, logos or watermarks.",
+  ].filter(Boolean);
+  const lower = base.toLowerCase();
+  const output = [
+    base || "Cinematic story scene.",
+    ...additions.filter((item) => !lower.includes(item.slice(0, 32).toLowerCase())),
+  ].join(" ");
+  return truncate(output, 1800);
 }
 
 function balanceFilmSceneDurations(scenes, totalDurationSeconds) {
@@ -2217,10 +2419,14 @@ Direction rules:
 - Split by dramatic beats: setup, inciting incident, complications, midpoint, crisis, climax, resolution.
 - Scenes must add up to about ${targetMinutes * 60} seconds.
 - Use 6 to 24 scenes. Each scene must be filmable as a short clip.
-- visualPrompt must be English and suitable for local Wan/ComfyUI video generation: one action, one place, one camera idea, concrete characters, no readable text.
+- Every scene must be anchored in the source text: sourceRange, location, timeOfDay, characters, action and camera must describe the same literal story beat.
+- visualPrompt must be English and suitable for local Wan/ComfyUI video generation: one action, one exact place, one camera idea, concrete visible characters, key objects, mood, no readable text.
+- visualPrompt must not be a poster, book cover, trailer montage, symbolic collage, generic fantasy landscape, or unrelated pretty scenery.
+- If the text does not support a character, crowd, castle, town, costume, creature, weapon or object, do not add it.
 - Keep the number of visible characters clear. Avoid crowds unless the text requires them.
 - Use voiceOver for narration bridges and dialogue for only important spoken lines.
 - Mention emotional continuity and recurring objects in continuityBible.
+- Prefer specific imageable nouns and verbs over vague style words. Each visualPrompt should still be understandable after copying it alone into a video/image model.
 - Requested visual style: ${style}.
 
 Grounded fallback structure you may improve but must not contradict:
@@ -2285,13 +2491,14 @@ function extractDialogue(text) {
 
 function buildFilmVisualPrompt({ title, sceneTitle, action, location, characters, mood, style }) {
   return [
-    `Cinematic short film scene from "${title || "the story"}": ${toVisualEnglish(sceneTitle)}.`,
-    location ? `Location: ${toVisualEnglish(location)}.` : "",
-    characters.length ? `Visible characters: ${characters.join(", ")}.` : "Visible characters only if clearly described in the source.",
-    action ? `Action beat: ${toVisualEnglish(action)}.` : "",
+    `Literal cinematic short film scene from "${title || "the story"}": ${toVisualEnglish(sceneTitle)}.`,
+    "Source-accurate story moment, not a poster, not a cover, not symbolic concept art.",
+    location ? `Exact location: ${toVisualEnglish(location)}.` : "",
+    characters.length ? `Visible characters only: ${characters.join(", ")}.` : "Visible characters only if clearly described in the source.",
+    action ? `Specific action beat: ${toVisualEnglish(action)}.` : "",
     mood ? `Mood: ${mood}.` : "",
     filmVisualStyle(style),
-    "One continuous shot, coherent anatomy, consistent faces and costumes, no readable text, no watermark, no extra main characters.",
+    "One continuous shot, coherent anatomy, consistent faces and costumes, key objects from the scene, no readable text, no watermark, no extra main characters, no unrelated scenery.",
   ].filter(Boolean).join(" ");
 }
 
@@ -2557,7 +2764,7 @@ function assessStoryQuality(story, { title, pages, requestedWords, language }) {
   return {
     ok: reasons.length === 0,
     message: reasons.length
-      ? `DeepSeek leverde geen bruikbaar verhaal (${reasons.join(", ")}). Probeer 'Diep 7B traag' of minder pagina's.`
+      ? `Het gekozen AI-model leverde geen bruikbaar verhaal (${reasons.join(", ")}). Probeer een diep model of minder pagina's.`
       : "verhaalkwaliteit voldoende",
     reasons,
     wordCount,
@@ -2701,8 +2908,11 @@ Rules:
 - Use empty strings or empty arrays for unknown fields; never output schema labels like "kort", "regel 1", "name", or "English prompt".
 - Character descriptions must be supported by the story text. If appearance is unknown, say that it is unknown and keep the portrait neutral.
 - chapterPrompt and coverPrompt must be in English for ComfyUI.
-- chapterPrompt must include a concrete scene, the exact characters present, location, important objects, and what should NOT be added.
+- chapterPrompt must describe one literal moment from the selected chapter, not a poster or montage.
+- chapterPrompt must include exact characters present, supported appearance details, location, time/mood, important objects, and what should NOT be added.
+- coverPrompt must be grounded in the whole story's central image and recurring characters/objects; it may be composed as a cover, but it must not invent a different setting.
 - Do not request abstract art, modern art, nostalgic Dutch-village painting, Anton Pieck/Piek-like scenery, unrelated fantasy villages, or extra people unless the story says so.
+- If appearance, clothing, age, location or object details are unknown, keep them neutral instead of inventing ornate replacements.
 - No readable text, no watermark.
 - Keep every field compact. Do not repeat whole chapters inside descriptions or prompts.
 
@@ -3446,7 +3656,16 @@ function setCors(res) {
 }
 
 function normalizeBaseUrl(value) {
-  return value.replace(/\/+$/, "");
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function apiUrl(baseUrl, path) {
+  const base = normalizeBaseUrl(baseUrl);
+  const suffix = String(path || "").startsWith("/") ? String(path || "") : `/${path || ""}`;
+  if (base.endsWith("/v1") && suffix.startsWith("/v1/")) {
+    return `${base}${suffix.slice(3)}`;
+  }
+  return `${base}${suffix}`;
 }
 
 function loadProjectEnv(projectRoot) {

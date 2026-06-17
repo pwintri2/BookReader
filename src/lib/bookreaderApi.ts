@@ -48,6 +48,14 @@ export type ApiHealth = {
     baseUrl: string;
     contextModel: string;
     storyModel: string;
+    filmModel?: string;
+  };
+  xaiApi?: {
+    configured: boolean;
+    baseUrl: string;
+    contextModel: string;
+    storyModel: string;
+    filmModel: string;
   };
   storage?: {
     outputDir: string;
@@ -58,7 +66,7 @@ export type ApiHealth = {
   };
 };
 
-export type AiProvider = "local" | "api";
+export type AiProvider = "local" | "api" | "deepseek" | "grok";
 
 export type ModelOption = {
   id: string;
@@ -81,6 +89,12 @@ export type ModelCatalogResponse = {
     models: ModelOption[];
     error?: string;
   };
+  xaiApi: {
+    configured: boolean;
+    baseUrl: string;
+    models: ModelOption[];
+    error?: string;
+  };
   defaults: {
     local: {
       fastContext: string;
@@ -91,6 +105,12 @@ export type ModelCatalogResponse = {
     api: {
       context: string;
       story: string;
+      film?: string;
+    };
+    xai: {
+      context: string;
+      story: string;
+      film: string;
     };
   };
 };
@@ -286,11 +306,13 @@ export type ContextAnalyzeResponse = {
   analysis: ContextAnalysis;
 };
 
-export type DeepSeekKeySaveResponse = {
+export type ApiKeySaveResponse = {
   ok: boolean;
   configured: boolean;
   message?: string;
 };
+
+export type DeepSeekKeySaveResponse = ApiKeySaveResponse;
 
 export type ProjectFileSummary = {
   id: string;
@@ -499,6 +521,13 @@ export async function cacheImage(apiBase: string, imageUrl: string, kind: string
 
 export async function saveDeepSeekApiKey(apiBase: string, apiKey: string, clear = false): Promise<DeepSeekKeySaveResponse> {
   return requestJson<DeepSeekKeySaveResponse>(apiBase, "/api/settings/deepseek-key", {
+    method: "POST",
+    body: JSON.stringify({ apiKey, clear }),
+  });
+}
+
+export async function saveXaiApiKey(apiBase: string, apiKey: string, clear = false): Promise<ApiKeySaveResponse> {
+  return requestJson<ApiKeySaveResponse>(apiBase, "/api/settings/xai-key", {
     method: "POST",
     body: JSON.stringify({ apiKey, clear }),
   });
