@@ -31,6 +31,12 @@ let DEEPSEEK_API_KEY = process.env.BOOKREADER_DEEPSEEK_API_KEY || "";
 const DEEPSEEK_API_BASE_URL = normalizeBaseUrl(process.env.BOOKREADER_DEEPSEEK_API_BASE_URL || "https://api.deepseek.com");
 const DEEPSEEK_API_CONTEXT_MODEL = process.env.BOOKREADER_DEEPSEEK_API_CONTEXT_MODEL || "deepseek-v4-flash";
 const DEEPSEEK_API_STORY_MODEL = process.env.BOOKREADER_DEEPSEEK_API_STORY_MODEL || "deepseek-v4-flash";
+const DEEPSEEK_API_MODEL_OPTIONS = [
+  { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
+  { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+  { id: "deepseek-chat", label: "DeepSeek Chat (legacy)" },
+  { id: "deepseek-reasoner", label: "DeepSeek Reasoner (legacy)" },
+];
 const MAX_CONTEXT_CHARS = Number(process.env.BOOKREADER_CONTEXT_MAX_CHARS || 18000);
 const REFERENCE_MAX_CHARS = Number(process.env.BOOKREADER_REFERENCE_MAX_CHARS || 60000);
 const CONTEXT_TIMEOUT_MS = Number(process.env.BOOKREADER_CONTEXT_TIMEOUT_MS || 35000);
@@ -287,6 +293,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/models") {
+      await sendJson(res, 200, await modelCatalogPayload());
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/projects/list") {
       await handleProjectList(res);
       return;
@@ -419,6 +430,148 @@ function healthPayload() {
       imageFiles: safeImageCount(),
     },
   };
+}
+
+async function modelCatalogPayload() {
+  const [ollama, deepseekApi] = await Promise.all([ollamaModelCatalog(), deepSeekApiModelCatalog()]);
+  return {
+    ok: true,
+    ollama,
+    deepseekApi,
+    defaults: {
+      local: {
+        fastContext: CONTEXT_MODEL,
+        deepContext: DEEP_CONTEXT_MODEL,
+        story: STORY_MODEL,
+        deepStory: DEEP_STORY_MODEL,
+      },
+      api: {
+        context: DEEPSEEK_API_CONTEXT_MODEL,
+        story: DEEPSEEK_API_STORY_MODEL,
+      },
+    },
+  };
+}
+
+async function ollamaModelCatalog() {
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/tags`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        url: OLLAMA_URL,
+        configured: false,
+        models: [],
+        error: `ollama_http_${response.status}`,
+      };
+    }
+
+    const models = normalizeModelOptions(
+      Array.isArray(payload.models)
+        ? payload.models.map((item) => {
+            const id = String(item.name || item.model || "").trim();
+            const details = item.details || {};
+            const parts = [details.parameter_size, details.quantization_level].filter(Boolean);
+            return {
+              id,
+              label: parts.length ? `${id} (${parts.join(", ")})` : id,
+              size: Number.isFinite(Number(item.size)) ? Number(item.size) : undefined,
+              modifiedAt: typeof item.modified_at === "string" ? item.modified_at : undefined,
+            };
+          })
+        : [],
+    );
+
+    return {
+      url: OLLAMA_URL,
+      configured: true,
+      models,
+    };
+  } catch (error) {
+    return {
+      url: OLLAMA_URL,
+      configured: false,
+      models: [],
+      error: error instanceof Error && error.message ? error.message : "ollama_unreachable",
+    };
+  }
+}
+
+async function deepSeekApiModelCatalog() {
+  const fallbackModels = normalizeModelOptions(DEEPSEEK_API_MODEL_OPTIONS);
+  if (!DEEPSEEK_API_KEY) {
+    return {
+      configured: false,
+      baseUrl: DEEPSEEK_API_BASE_URL,
+      models: fallbackModels,
+    };
+  }
+
+  try {
+    const response = await fetch(`${DEEPSEEK_API_BASE_URL}/models`, {
+      headers: {
+        Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
+      },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        configured: true,
+        baseUrl: DEEPSEEK_API_BASE_URL,
+        models: fallbackModels,
+        error: `deepseek_models_http_${response.status}`,
+      };
+    }
+
+    const liveModels = Array.isArray(payload.data)
+      ? payload.data.map((item) => ({
+          id: String(item.id || "").trim(),
+          label: String(item.id || "").trim(),
+        }))
+      : [];
+    return {
+      configured: true,
+      baseUrl: DEEPSEEK_API_BASE_URL,
+      models: mergeModelOptions(fallbackModels, liveModels),
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      baseUrl: DEEPSEEK_API_BASE_URL,
+      models: fallbackModels,
+      error: error instanceof Error && error.message ? error.message : "deepseek_models_unreachable",
+    };
+  }
+}
+
+function mergeModelOptions(primary, secondary) {
+  return normalizeModelOptions([...primary, ...secondary]);
+}
+
+function normalizeModelOptions(models) {
+  const seen = new Set();
+  return models
+    .map((item) => {
+      const id = sanitizeModelName(item.id);
+      if (!id || seen.has(id)) return null;
+      seen.add(id);
+      return {
+        id,
+        label: String(item.label || id).trim() || id,
+        ...(Number.isFinite(Number(item.size)) ? { size: Number(item.size) } : {}),
+        ...(typeof item.modifiedAt === "string" && item.modifiedAt ? { modifiedAt: item.modifiedAt } : {}),
+      };
+    })
+    .filter(Boolean);
+}
+
+function sanitizeModelName(value) {
+  const model = String(value || "").trim().slice(0, 220);
+  return model && /^[A-Za-z0-9._:/@+-]+$/.test(model) ? model : "";
+}
+
+function selectRequestModel(requestedModel, fallbackModel) {
+  return sanitizeModelName(requestedModel) || fallbackModel;
 }
 
 async function handleProjectList(res) {
@@ -613,7 +766,8 @@ async function handleContextAnalyze(req, res) {
   const mode = body.mode === "deep" ? "deep" : "fast";
   const provider = body.provider === "api" ? "api" : "local";
   const localModel = mode === "deep" ? DEEP_CONTEXT_MODEL : CONTEXT_MODEL;
-  const model = provider === "api" ? DEEPSEEK_API_CONTEXT_MODEL : localModel;
+  const defaultModel = provider === "api" ? DEEPSEEK_API_CONTEXT_MODEL : localModel;
+  const model = selectRequestModel(body.model, defaultModel);
   const timeoutMs = mode === "deep" ? DEEP_CONTEXT_TIMEOUT_MS : CONTEXT_TIMEOUT_MS;
   const maxContextChars = mode === "deep" ? Math.max(MAX_CONTEXT_CHARS, 36000) : MAX_CONTEXT_CHARS;
 
@@ -786,7 +940,8 @@ async function handleStoryGenerate(req, res) {
   const provider = body.provider === "api" ? "api" : "local";
   const narrativePreset = body.narrativePreset === "rich_intro" ? "rich_intro" : "balanced";
   const localModel = mode === "deep" ? DEEP_STORY_MODEL : STORY_MODEL;
-  const model = provider === "api" ? DEEPSEEK_API_STORY_MODEL : localModel;
+  const defaultModel = provider === "api" ? DEEPSEEK_API_STORY_MODEL : localModel;
+  const model = selectRequestModel(body.model, defaultModel);
   const timeoutMs = mode === "deep" ? DEEP_STORY_TIMEOUT_MS : STORY_TIMEOUT_MS;
   const pages = clampNumber(Number(body.pages || (narrativePreset === "rich_intro" ? 6 : 4)), narrativePreset === "rich_intro" ? 4 : 1, mode === "deep" ? 24 : 12);
   const wordsPerPage = clampNumber(Number(body.wordsPerPage || (narrativePreset === "rich_intro" ? 750 : 550)), narrativePreset === "rich_intro" ? 650 : 180, 1000);
@@ -988,7 +1143,8 @@ async function handleFilmPlan(req, res) {
   const mode = body.mode === "deep" ? "deep" : "fast";
   const provider = body.provider === "api" ? "api" : "local";
   const localModel = mode === "deep" ? DEEP_STORY_MODEL : STORY_MODEL;
-  const model = provider === "api" ? DEEPSEEK_API_STORY_MODEL : localModel;
+  const defaultModel = provider === "api" ? DEEPSEEK_API_STORY_MODEL : localModel;
+  const model = selectRequestModel(body.model, defaultModel);
   const timeoutMs = mode === "deep" ? DEEP_FILM_TIMEOUT_MS : FILM_TIMEOUT_MS;
   const targetMinutes = clampNumber(Number(body.targetMinutes || 7), 5, 10);
   const sceneCount = clampNumber(Number(body.sceneCount || targetMinutes * 2), 6, 24);

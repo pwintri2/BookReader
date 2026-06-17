@@ -49,6 +49,17 @@ try:
     response = conn.getresponse()
     health_payload = json.loads(response.read().decode("utf-8") or "{}")
     film_ok = response.status == 200 and isinstance(health_payload.get("film"), dict)
+    conn.close()
+
+    conn = http.client.HTTPConnection(host, port, timeout=1.0)
+    conn.request("GET", "/api/models")
+    response = conn.getresponse()
+    models_payload = json.loads(response.read().decode("utf-8") or "{}")
+    models_ok = (
+        response.status == 200
+        and isinstance(models_payload.get("ollama", {}).get("models"), list)
+        and isinstance(models_payload.get("deepseekApi", {}).get("models"), list)
+    )
 except Exception:
     sys.exit(1)
 finally:
@@ -57,7 +68,7 @@ finally:
     except Exception:
         pass
 
-sys.exit(0 if projects_ok and film_ok else 1)
+sys.exit(0 if projects_ok and film_ok and models_ok else 1)
 PY
 }
 
@@ -73,7 +84,7 @@ fi
 if ! api_is_ready; then
   (
     cd "$APP_DIR"
-    nohup npm run api >> "$API_LOG" 2>&1 &
+    nohup node server/bookreader-api.mjs >> "$API_LOG" 2>&1 &
   )
   for _ in {1..40}; do
     api_is_ready && break

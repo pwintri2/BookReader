@@ -35,8 +35,11 @@ import {
   generateStory,
   getHealth,
   getIllustrationStatus,
+  getModelCatalog,
   listProjectFiles,
   mediaUrl,
+  ModelCatalogResponse,
+  ModelOption,
   openProjectFile,
   planFilm,
   ProjectFileSummary,
@@ -186,6 +189,11 @@ export function App() {
   const [apiHealth, setApiHealth] = useState<ApiHealth | null>(null);
   const [apiStatus, setApiStatus] = useState("niet gecontroleerd");
   const [apiBusy, setApiBusy] = useState(false);
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalogResponse | null>(null);
+  const [modelCatalogStatus, setModelCatalogStatus] = useState("modellen nog niet geladen");
+  const [modelCatalogBusy, setModelCatalogBusy] = useState(false);
+  const [selectedLocalModel, setSelectedLocalModel] = useState("");
+  const [selectedApiModel, setSelectedApiModel] = useState("");
   const [deepSeekApiKeyInput, setDeepSeekApiKeyInput] = useState("");
   const [deepSeekKeyBusy, setDeepSeekKeyBusy] = useState(false);
   const [illustrationStyleId, setIllustrationStyleId] = useState<IllustrationStyleId>("storybook");
@@ -255,6 +263,17 @@ export function App() {
   const selectedVoice = voices.find((voice) => voice.voiceURI === voiceURI) || voices[0];
   const selectedVoiceStyle = VOICE_STYLES.find((style) => style.id === voiceStyleId) || VOICE_STYLES[0];
   const apiOnline = apiHealth?.ok === true;
+  const localModelOptions = useMemo(
+    () => withSelectedModel(modelCatalog?.ollama.models || [], selectedLocalModel),
+    [modelCatalog?.ollama.models, selectedLocalModel],
+  );
+  const apiModelOptions = useMemo(
+    () => withSelectedModel(modelCatalog?.deepseekApi.models || [], selectedApiModel),
+    [modelCatalog?.deepseekApi.models, selectedApiModel],
+  );
+  const activeModelOptions = aiProvider === "api" ? apiModelOptions : localModelOptions;
+  const selectedAiModel = aiProvider === "api" ? selectedApiModel : selectedLocalModel;
+  const activeModelLabel = modelOptionLabel(activeModelOptions, selectedAiModel) || selectedAiModel || "standaardmodel";
 
   useEffect(() => {
     const loadVoices = () => {
@@ -297,6 +316,7 @@ export function App() {
 
   useEffect(() => {
     void refreshApiHealth(false);
+    void refreshModelCatalog(false);
   }, []);
 
   useEffect(() => {
@@ -426,7 +446,11 @@ export function App() {
     setStoryBusy(true);
     const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
     const presetLabel = storyNarrativePreset === "rich_intro" ? " met veel detail en lange intro" : "";
-    setStoryStatus(storyMode === "deep" ? `${providerLabel} schrijft uitgebreid${presetLabel}...` : `${providerLabel} schrijft kort${presetLabel}...`);
+    setStoryStatus(
+      storyMode === "deep"
+        ? `${providerLabel} ${activeModelLabel} schrijft uitgebreid${presetLabel}...`
+        : `${providerLabel} ${activeModelLabel} schrijft kort${presetLabel}...`,
+    );
     setNotice("");
     try {
       const response = await generateStory(apiBase, {
@@ -439,6 +463,7 @@ export function App() {
         language: storyLanguage,
         mode: storyMode,
         provider: aiProvider,
+        model: selectedAiModel || undefined,
         narrativePreset: storyNarrativePreset,
         referenceTitle,
         referenceText,
@@ -464,7 +489,7 @@ export function App() {
     }
     setFilmBusy(true);
     const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
-    setFilmStatus(`${providerLabel} maakt een scene breakdown...`);
+    setFilmStatus(`${providerLabel} ${activeModelLabel} maakt een scene breakdown...`);
     setNotice("");
     try {
       const response = await planFilm(apiBase, {
@@ -475,6 +500,7 @@ export function App() {
         style: illustrationStyleId,
         mode: filmMode,
         provider: aiProvider,
+        model: selectedAiModel || undefined,
       });
       setFilmPlan(response.plan);
       const responseProvider =
@@ -658,6 +684,36 @@ export function App() {
     }
   }
 
+  async function refreshModelCatalog(showNotice = true) {
+    setModelCatalogBusy(true);
+    try {
+      const catalog = await getModelCatalog(apiBase);
+      setModelCatalog(catalog);
+      setSelectedLocalModel((current) =>
+        chooseCatalogModel(current, catalog.ollama.models, [
+          catalog.defaults.local.deepStory,
+          catalog.defaults.local.story,
+          catalog.defaults.local.deepContext,
+          catalog.defaults.local.fastContext,
+        ]),
+      );
+      setSelectedApiModel((current) => chooseCatalogModel(current, catalog.deepseekApi.models, [catalog.defaults.api.story, catalog.defaults.api.context]));
+      const ollamaLabel = catalog.ollama.models.length ? `${catalog.ollama.models.length} Ollama` : "geen Ollama";
+      const apiLabel = catalog.deepseekApi.models.length ? `${catalog.deepseekApi.models.length} DeepSeek API` : "geen DeepSeek API";
+      const warning = [catalog.ollama.error ? "Ollama lijst niet live" : "", catalog.deepseekApi.error ? "DeepSeek lijst fallback" : ""]
+        .filter(Boolean)
+        .join(", ");
+      setModelCatalogStatus(warning ? `${ollamaLabel}, ${apiLabel} (${warning})` : `${ollamaLabel}, ${apiLabel}`);
+      if (showNotice) setNotice("Modellenlijst bijgewerkt.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Modellenlijst kon niet worden geladen.";
+      setModelCatalogStatus(message);
+      if (showNotice) setNotice(message);
+    } finally {
+      setModelCatalogBusy(false);
+    }
+  }
+
   async function saveDeepSeekKey() {
     const apiKey = deepSeekApiKeyInput.trim();
     if (!apiKey) {
@@ -670,6 +726,7 @@ export function App() {
       setDeepSeekApiKeyInput("");
       setNotice(response.message || "DeepSeek API key is opgeslagen.");
       await refreshApiHealth(false);
+      await refreshModelCatalog(false);
     } catch (error) {
       const message = error instanceof Error ? error.message : "DeepSeek API key kon niet worden opgeslagen.";
       setNotice(message);
@@ -686,6 +743,7 @@ export function App() {
       setAiProvider("local");
       setNotice(response.message || "DeepSeek API key is gewist.");
       await refreshApiHealth(false);
+      await refreshModelCatalog(false);
     } catch (error) {
       const message = error instanceof Error ? error.message : "DeepSeek API key kon niet worden gewist.";
       setNotice(message);
@@ -762,7 +820,11 @@ export function App() {
     }
     setContextBusy(true);
     const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
-    setContextStatus(mode === "deep" ? `${providerLabel} doet diepe verhaalcontext...` : `${providerLabel} analyseert verhaalcontext...`);
+    setContextStatus(
+      mode === "deep"
+        ? `${providerLabel} ${activeModelLabel} doet diepe verhaalcontext...`
+        : `${providerLabel} ${activeModelLabel} analyseert verhaalcontext...`,
+    );
     try {
       const response = await analyzeContext(apiBase, {
         title: documentTitle,
@@ -772,6 +834,7 @@ export function App() {
         style: illustrationStyleId,
         mode,
         provider: aiProvider,
+        model: selectedAiModel || undefined,
       });
       const analysis = response.analysis;
       setContextAnalysis(analysis);
@@ -1198,10 +1261,10 @@ export function App() {
               </select>
             </label>
             <label className="field compact-field">
-              <span>Model</span>
+              <span>Werkstand</span>
               <select value={storyMode} onChange={(event) => setStoryMode(event.target.value as "fast" | "deep")}>
-                <option value="fast">{aiProvider === "api" ? "Kort API" : "Kort 7B"}</option>
-                <option value="deep">{aiProvider === "api" ? "Uitgebreid API" : "Uitgebreid 7B"}</option>
+                <option value="fast">Kort</option>
+                <option value="deep">Uitgebreid</option>
               </select>
             </label>
             <label className="field compact-field">
@@ -1211,6 +1274,40 @@ export function App() {
                 <option value="api">DeepSeek API</option>
               </select>
             </label>
+            <label className="field compact-field model-field">
+              <span>{aiProvider === "api" ? "DeepSeek model" : "Ollama model"}</span>
+              <select
+                value={selectedAiModel}
+                onChange={(event) => {
+                  if (aiProvider === "api") {
+                    setSelectedApiModel(event.target.value);
+                  } else {
+                    setSelectedLocalModel(event.target.value);
+                  }
+                }}
+                disabled={!activeModelOptions.length && !selectedAiModel}
+              >
+                {activeModelOptions.length ? (
+                  activeModelOptions.map((model) => (
+                    <option value={model.id} key={model.id}>
+                      {model.label}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">Geen modellen gevonden</option>
+                )}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="quiet icon-button model-refresh-button"
+              onClick={() => void refreshModelCatalog(true)}
+              disabled={modelCatalogBusy}
+              title="Modellen vernieuwen"
+              aria-label="Modellen vernieuwen"
+            >
+              {modelCatalogBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
+            </button>
           </div>
           <button type="button" onClick={() => void createStoryFromPrompt()} disabled={storyBusy || !storyPrompt.trim()}>
             {storyBusy ? <Loader2 size={16} /> : <Wand2 size={16} />}
@@ -1246,13 +1343,16 @@ export function App() {
               </select>
             </label>
             <label className="field compact-field">
-              <span>Model</span>
+              <span>Werkstand</span>
               <select value={filmMode} onChange={(event) => setFilmMode(event.target.value as "fast" | "deep")}>
-                <option value="fast">{aiProvider === "api" ? "Snel API" : "Snel lokaal"}</option>
-                <option value="deep">{aiProvider === "api" ? "Diep API" : "Diep lokaal"}</option>
+                <option value="fast">Snel</option>
+                <option value="deep">Diep</option>
               </select>
             </label>
           </div>
+          <p className="voice-style-note">
+            AI: {aiProvider === "api" ? "DeepSeek API" : "Lokale Ollama"} · {activeModelLabel}
+          </p>
           <button type="button" onClick={() => void createFilmPlan()} disabled={filmBusy || !rawText.trim()}>
             {filmBusy ? <Loader2 size={16} /> : <Film size={16} />}
             <span>{filmBusy ? "Regisseert..." : "Maak filmplan"}</span>
@@ -1341,6 +1441,7 @@ export function App() {
               {apiHealth?.context?.deepModel || "onbekend"}, API {apiHealth?.deepseekApi?.configured ? apiHealth.deepseekApi.storyModel : "geen key"},{" "}
               {apiHealth?.storage?.audioFiles ?? 0} audiofiles, {apiHealth?.storage?.imageFiles ?? 0} beelden
             </small>
+            <small>{modelCatalogStatus}</small>
           </div>
         </section>
 
@@ -1429,7 +1530,7 @@ export function App() {
           </button>
           <button type="button" className="quiet" onClick={() => void runDeepSeekContextAnalysis("deep")} disabled={contextBusy || !rawText.trim()}>
             {contextBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
-            <span>{aiProvider === "api" ? "Diepe context API" : "Diepe context 7B traag"}</span>
+            <span>{aiProvider === "api" ? "Diepe context API" : "Diepe context"}</span>
           </button>
           <p className="voice-style-note">{contextStatus}</p>
           <label className="field">
@@ -1622,6 +1723,24 @@ export function App() {
       </aside>
     </main>
   );
+}
+
+function withSelectedModel(options: ModelOption[], selectedId: string): ModelOption[] {
+  const normalized = options.filter((model) => model.id);
+  if (!selectedId || normalized.some((model) => model.id === selectedId)) {
+    return normalized;
+  }
+  return [{ id: selectedId, label: selectedId }, ...normalized];
+}
+
+function modelOptionLabel(options: ModelOption[], selectedId: string): string {
+  return options.find((model) => model.id === selectedId)?.label || "";
+}
+
+function chooseCatalogModel(current: string, options: ModelOption[], preferredIds: string[]): string {
+  const ids = new Set(options.map((model) => model.id));
+  if (current && (!options.length || ids.has(current))) return current;
+  return preferredIds.find((id) => id && (!options.length || ids.has(id))) || options[0]?.id || current || "";
 }
 
 function chunkForSpeech(text: string, maxChunkLength = 1200): string[] {

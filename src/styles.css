@@ -220,6 +220,15 @@ textarea:focus {
   flex: 1 1 120px;
 }
 
+.model-field {
+  flex: 2 1 210px;
+}
+
+.model-refresh-button {
+  align-self: flex-end;
+  flex: 0 0 auto;
+}
+
 .reader-main {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);

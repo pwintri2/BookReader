@@ -58,6 +58,41 @@ export type ApiHealth = {
 
 export type AiProvider = "local" | "api";
 
+export type ModelOption = {
+  id: string;
+  label: string;
+  size?: number;
+  modifiedAt?: string;
+};
+
+export type ModelCatalogResponse = {
+  ok: boolean;
+  ollama: {
+    url: string;
+    configured: boolean;
+    models: ModelOption[];
+    error?: string;
+  };
+  deepseekApi: {
+    configured: boolean;
+    baseUrl: string;
+    models: ModelOption[];
+    error?: string;
+  };
+  defaults: {
+    local: {
+      fastContext: string;
+      deepContext: string;
+      story: string;
+      deepStory: string;
+    };
+    api: {
+      context: string;
+      story: string;
+    };
+  };
+};
+
 export type StoryGenerateRequest = {
   prompt: string;
   pages: number;
@@ -68,6 +103,7 @@ export type StoryGenerateRequest = {
   language?: string;
   mode?: "fast" | "deep";
   provider?: AiProvider;
+  model?: string;
   narrativePreset?: "balanced" | "rich_intro";
   referenceTitle?: string;
   referenceText?: string;
@@ -129,6 +165,7 @@ export type FilmPlanRequest = {
   style?: string;
   mode?: "fast" | "deep";
   provider?: AiProvider;
+  model?: string;
 };
 
 export type FilmPlanResponse = {
@@ -231,6 +268,7 @@ export type ContextAnalyzeRequest = {
   style?: string;
   mode?: "fast" | "deep";
   provider?: AiProvider;
+  model?: string;
 };
 
 export type ContextAnalyzeResponse = {
@@ -287,6 +325,10 @@ export function mediaUrl(apiBase: string, path: string): string {
 
 export async function getHealth(apiBase: string): Promise<ApiHealth> {
   return requestJson<ApiHealth>(apiBase, "/api/health");
+}
+
+export async function getModelCatalog(apiBase: string): Promise<ModelCatalogResponse> {
+  return requestJson<ModelCatalogResponse>(apiBase, "/api/models");
 }
 
 export async function listProjectFiles(apiBase: string): Promise<ProjectFileListResponse> {

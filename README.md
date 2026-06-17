@@ -105,6 +105,8 @@ BOOKREADER_DEEPSEEK_API_STORY_MODEL=deepseek-v4-flash
 
 You can also paste the key in the app under `Serverlaag -> DeepSeek API key`. The frontend only receives whether a key is configured; it never receives the key itself.
 
+Model selection is available in the app. The API exposes `GET /api/models`, which reads local Ollama models from `BOOKREADER_OLLAMA_URL /api/tags` and offers DeepSeek API choices. The environment variables above remain the defaults; the selected model from the UI can override them for story generation, context analysis and film planning. DeepSeek falls back to the currently documented API model names `deepseek-v4-flash`, `deepseek-v4-pro`, `deepseek-chat` and `deepseek-reasoner`, and tries the live DeepSeek `/models` endpoint when a key is configured.
+
 ## Story Generation
 
 The story panel can create a complete multi-page story from a prompt. It supports:
