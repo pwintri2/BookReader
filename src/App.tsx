@@ -257,6 +257,7 @@ export function App() {
   const [storyPrompt, setStoryPrompt] = useState(initialStoryPromptMeta.prompt);
   const [storyPromptMeta, setStoryPromptMeta] = useState<StoryPromptMeta>(initialStoryPromptMeta);
   const [promptBuilderOpen, setPromptBuilderOpen] = useState(false);
+  const [promptDraft, setPromptDraft] = useState(initialStoryPromptMeta.prompt);
   const [promptCharacters, setPromptCharacters] = useState(initialStoryPromptMeta.characters);
   const [promptPlot, setPromptPlot] = useState(initialStoryPromptMeta.plot);
   const [promptMainEvent, setPromptMainEvent] = useState(initialStoryPromptMeta.mainEvent);
@@ -509,6 +510,7 @@ export function App() {
     if (project.storyPrompt?.prompt) {
       setStoryPrompt(project.storyPrompt.prompt);
       setStoryPromptMeta(project.storyPrompt);
+      setPromptDraft(project.storyPrompt.prompt);
       setPromptCharacters(project.storyPrompt.characters || "");
       setPromptPlot(project.storyPrompt.plot || "");
       setPromptMainEvent(project.storyPrompt.mainEvent || "");
@@ -516,6 +518,7 @@ export function App() {
       const emptyPrompt = buildGuidedStoryPrompt("", "", "");
       setStoryPrompt("");
       setStoryPromptMeta(emptyPrompt);
+      setPromptDraft("");
       setPromptCharacters("");
       setPromptPlot("");
       setPromptMainEvent("");
@@ -551,14 +554,34 @@ export function App() {
     processText(documentTitle, rawText);
   }
 
-  function saveGuidedPrompt() {
+  function openPromptBuilder() {
+    setPromptDraft(storyPrompt || storyPromptMeta.prompt || "");
+    setPromptBuilderOpen(true);
+  }
+
+  function updatePromptDraftFromAnswers() {
     const nextPrompt = buildGuidedStoryPrompt(promptCharacters, promptPlot, promptMainEvent);
     if (!nextPrompt.characters.trim() || !nextPrompt.plot.trim() || !nextPrompt.mainEvent.trim()) {
       setNotice("Vul alle drie de promptvragen in.");
       return;
     }
-    setStoryPrompt(nextPrompt.prompt);
-    setStoryPromptMeta(nextPrompt);
+    setPromptDraft(nextPrompt.prompt);
+    setNotice("Prompt bijgewerkt vanuit de antwoorden.");
+  }
+
+  function saveGuidedPrompt() {
+    const nextPrompt = buildGuidedStoryPrompt(promptCharacters, promptPlot, promptMainEvent);
+    const hasCompleteAnswers = Boolean(nextPrompt.characters.trim() && nextPrompt.plot.trim() && nextPrompt.mainEvent.trim());
+    const finalPrompt = promptDraft.trim();
+    if (!finalPrompt && !hasCompleteAnswers) {
+      setNotice("Vul de prompt in of beantwoord alle drie de promptvragen.");
+      return;
+    }
+    const savedPrompt = finalPrompt || nextPrompt.prompt;
+    const savedPromptMeta = { ...nextPrompt, prompt: savedPrompt, updatedAt: new Date().toISOString() };
+    setStoryPrompt(savedPrompt);
+    setStoryPromptMeta(savedPromptMeta);
+    setPromptDraft(savedPrompt);
     setPromptBuilderOpen(false);
     setNotice("Prompt gemaakt en bewaard bij dit verhaal.");
   }
@@ -1336,6 +1359,7 @@ export function App() {
     setCoverStatus("klaar voor cover");
     setStoryPrompt(initialStoryPromptMeta.prompt);
     setStoryPromptMeta(initialStoryPromptMeta);
+    setPromptDraft(initialStoryPromptMeta.prompt);
     setPromptCharacters(initialStoryPromptMeta.characters);
     setPromptPlot(initialStoryPromptMeta.plot);
     setPromptMainEvent(initialStoryPromptMeta.mainEvent);
@@ -1924,16 +1948,10 @@ export function App() {
             <FileText size={17} />
             <span>Verhaal maken</span>
           </div>
-          <button type="button" className="quiet" onClick={() => setPromptBuilderOpen((open) => !open)}>
+          <button type="button" className="quiet" onClick={promptBuilderOpen ? () => setPromptBuilderOpen(false) : openPromptBuilder}>
             <Sparkles size={16} />
-            <span>{storyPrompt.trim() ? "Prompt bekijken / aanpassen" : "Prompt maken"}</span>
+            <span>{promptBuilderOpen ? "Prompt sluiten" : storyPrompt.trim() ? "Prompt bekijken / aanpassen" : "Prompt maken"}</span>
           </button>
-          {storyPrompt.trim() ? (
-            <div className="context-brief">
-              <small>Saved prompt</small>
-              <p>{storyPrompt}</p>
-            </div>
-          ) : null}
           {promptBuilderOpen ? (
             <div className="context-brief">
               <label className="field">
@@ -1949,6 +1967,16 @@ export function App() {
                 <textarea value={promptMainEvent} onChange={(event) => setPromptMainEvent(event.target.value)} rows={3} />
               </label>
               <div className="button-row">
+                <button type="button" className="quiet" onClick={updatePromptDraftFromAnswers}>
+                  <RefreshCw size={16} />
+                  <span>Update prompt from answers</span>
+                </button>
+              </div>
+              <label className="field">
+                <span>Editable generated prompt</span>
+                <textarea value={promptDraft} onChange={(event) => setPromptDraft(event.target.value)} rows={8} />
+              </label>
+              <div className="button-row">
                 <button type="button" onClick={saveGuidedPrompt}>
                   <Save size={16} />
                   <span>Save prompt</span>
@@ -1958,6 +1986,12 @@ export function App() {
                   <span>Close</span>
                 </button>
               </div>
+            </div>
+          ) : null}
+          {storyPrompt.trim() && !promptBuilderOpen ? (
+            <div className="context-brief">
+              <small>Saved prompt</small>
+              <p>{storyPrompt}</p>
             </div>
           ) : null}
           <label className="field">
