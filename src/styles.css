@@ -299,6 +299,27 @@ textarea:focus {
   padding-right: 2px;
 }
 
+.category-drop-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.category-drop-zone {
+  min-height: 32px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.category-drop-zone small {
+  color: var(--muted-2);
+}
+
+.category-drop-zone.drop-ready {
+  border-color: rgba(105, 208, 187, 0.78);
+  background: #24322f;
+}
+
 .saved-story-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 38px;
@@ -306,8 +327,38 @@ textarea:focus {
   align-items: stretch;
 }
 
+.library-story-item {
+  grid-template-columns: 42px minmax(0, 1fr) 38px;
+}
+
 .file-story-item {
   grid-template-columns: minmax(0, 1fr);
+}
+
+.reference-toggle {
+  display: grid;
+  place-items: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 72px;
+  padding: 8px 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #20262a;
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.reference-toggle input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.reference-count {
+  flex: 1 1 120px;
+  align-self: center;
 }
 
 .saved-story-open {

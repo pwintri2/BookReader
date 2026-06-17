@@ -1,5 +1,6 @@
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowRight,
   BookOpen,
   BookImage,
   Clipboard,
@@ -12,12 +13,14 @@ import {
   Loader2,
   Pause,
   Play,
+  Plus,
   RefreshCw,
   Search,
   Server,
   Save,
   Sparkles,
   Square,
+  Tag,
   Trash2,
   Upload,
   Users,
@@ -31,19 +34,28 @@ import {
   cacheImage,
   ContextAnalysis,
   FilmPlan,
+  assignLibraryCategory,
   generateIllustration,
   generateStory,
   getHealth,
   getIllustrationStatus,
   getModelCatalog,
+  createLibraryCategory,
+  importJsonProjectsToLibrary,
+  LibraryCategory,
+  LibraryProjectSummary,
+  listLibraryCategories,
+  listLibraryProjects,
   listProjectFiles,
   mediaUrl,
   ModelCatalogResponse,
   ModelOption,
+  openLibraryProject,
   openProjectFile,
   planFilm,
   ProjectFileSummary,
   saveDeepSeekApiKey,
+  saveLibraryProject,
   synthesizeSpeech,
 } from "./lib/bookreaderApi";
 import {
@@ -73,6 +85,10 @@ type StoryLanguage = "Auto" | "Nederlands" | "English" | "Deutsch" | "Français"
 type StoryNarrativePreset = "balanced" | "rich_intro";
 type ChapterIllustrationMap = Record<string, SavedChapterIllustration>;
 type CharacterPortraitRecord = CharacterPortrait & { imageUrl?: string };
+type ReferenceStoryProject = {
+  title: string;
+  rawText: string;
+};
 type SavedStoryEntry = {
   id: string;
   title: string;
@@ -225,6 +241,13 @@ export function App() {
   const [referenceTitle, setReferenceTitle] = useState("");
   const [referenceText, setReferenceText] = useState("");
   const [referenceStatus, setReferenceStatus] = useState("geen referentie");
+  const [referenceStoryIds, setReferenceStoryIds] = useState<string[]>([]);
+  const [referenceStoryProjects, setReferenceStoryProjects] = useState<Record<string, ReferenceStoryProject>>({});
+  const [sequelSourceId, setSequelSourceId] = useState("");
+  const [sequelSourceTitle, setSequelSourceTitle] = useState("");
+  const [sequelSourceText, setSequelSourceText] = useState("");
+  const [sequelSourceCategoryIds, setSequelSourceCategoryIds] = useState<string[]>([]);
+  const [sequelStatus, setSequelStatus] = useState("geen vervolgbron");
   const [storyBusy, setStoryBusy] = useState(false);
   const [storyStatus, setStoryStatus] = useState("DeepSeek chatmodel schrijft betere verhalen dan R1");
   const [filmTargetMinutes, setFilmTargetMinutes] = useState(7);
@@ -235,7 +258,16 @@ export function App() {
   const [filmStatus, setFilmStatus] = useState("klaar voor adaptatie");
   const [assetStorageStatus, setAssetStorageStatus] = useState("beeldenmap: /home/pwintri2/BookReader/out/bookreader/images");
   const [projectBusy, setProjectBusy] = useState(false);
+  const [currentLibraryProjectId, setCurrentLibraryProjectId] = useState("");
   const [savedStories, setSavedStories] = useState<SavedStoryEntry[]>([]);
+  const [libraryStories, setLibraryStories] = useState<LibraryProjectSummary[]>([]);
+  const [libraryCategories, setLibraryCategories] = useState<LibraryCategory[]>([]);
+  const [libraryBusy, setLibraryBusy] = useState(false);
+  const [libraryStatus, setLibraryStatus] = useState("SQL-bibliotheek nog niet geladen");
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [selectedCategoryId, setSelectedCategoryId] = useState("");
+  const [assignCategoryId, setAssignCategoryId] = useState("");
+  const [draggedLibraryStoryId, setDraggedLibraryStoryId] = useState("");
   const [projectFiles, setProjectFiles] = useState<ProjectFileSummary[]>([]);
   const [projectScanBusy, setProjectScanBusy] = useState(false);
   const [projectScanStatus, setProjectScanStatus] = useState("JSON-bestanden nog niet gescand");
@@ -255,10 +287,26 @@ export function App() {
     if (!q) return chapters;
     return chapters.filter((chapter) => `${chapter.title} ${chapter.text}`.toLowerCase().includes(q));
   }, [chapters, query]);
+  const libraryStoryKeys = useMemo(() => new Set(libraryStories.map((entry) => storyIdentityKey(entry.title, entry.savedAt))), [libraryStories]);
+  const localStoryEntries = useMemo(
+    () => savedStories.filter((entry) => !libraryStoryKeys.has(storyIdentityKey(entry.title, entry.savedAt))),
+    [libraryStoryKeys, savedStories],
+  );
   const scannedStoryFiles = useMemo(() => {
-    const localKeys = new Set(savedStories.map((entry) => storyIdentityKey(entry.title, entry.savedAt)));
-    return projectFiles.filter((entry) => !localKeys.has(storyIdentityKey(entry.title, entry.savedAt)));
-  }, [projectFiles, savedStories]);
+    const knownKeys = new Set([
+      ...savedStories.map((entry) => storyIdentityKey(entry.title, entry.savedAt)),
+      ...libraryStories.map((entry) => storyIdentityKey(entry.title, entry.savedAt)),
+    ]);
+    return projectFiles.filter((entry) => !knownKeys.has(storyIdentityKey(entry.title, entry.savedAt)));
+  }, [libraryStories, projectFiles, savedStories]);
+  const visibleLibraryStories = useMemo(
+    () => (selectedCategoryId ? libraryStories.filter((entry) => entry.categoryIds.includes(selectedCategoryId)) : libraryStories),
+    [libraryStories, selectedCategoryId],
+  );
+  const activeStoryCategoryNames = useMemo(() => {
+    const active = libraryStories.find((entry) => entry.id === currentLibraryProjectId);
+    return active?.categories.map((category) => category.name).join(", ") || "";
+  }, [currentLibraryProjectId, libraryStories]);
 
   const selectedVoice = voices.find((voice) => voice.voiceURI === voiceURI) || voices[0];
   const selectedVoiceStyle = VOICE_STYLES.find((style) => style.id === voiceStyleId) || VOICE_STYLES[0];
@@ -327,8 +375,14 @@ export function App() {
     void refreshProjectFiles(false);
   }, []);
 
+  useEffect(() => {
+    void refreshLibrary(false);
+    void refreshCategories(false);
+  }, []);
+
   function processText(title: string, text: string) {
     const result = splitIntoChapters(text);
+    setCurrentLibraryProjectId("");
     setDocumentTitle(title || "Nieuw document");
     setRawText(text);
     setChapters(result.chapters);
@@ -388,11 +442,12 @@ export function App() {
     }
   }
 
-  function loadBookProject(project: BookProject) {
+  function loadBookProject(project: BookProject, libraryProjectId = "") {
     const result = splitIntoChapters(project.rawText);
     const chapterIllustrationList = Array.isArray(project.chapterIllustrations) ? project.chapterIllustrations : [];
     const portraitList = Array.isArray(project.characterPortraits) ? project.characterPortraits : [];
     const chapterMap = Object.fromEntries(chapterIllustrationList.map((item) => [item.chapterId, item]));
+    setCurrentLibraryProjectId(libraryProjectId);
     setDocumentTitle(project.title || "Nieuw document");
     setRawText(project.rawText);
     setChapters(result.chapters);
@@ -438,6 +493,21 @@ export function App() {
     processText(documentTitle, rawText);
   }
 
+  function combinedReferencePayload() {
+    const databaseReferences = referenceStoryIds
+      .map((id) => referenceStoryProjects[id])
+      .filter((project): project is ReferenceStoryProject => Boolean(project?.rawText?.trim()));
+    const title = [
+      referenceTitle,
+      ...databaseReferences.map((project) => project.title),
+    ].filter(Boolean).join(" + ");
+    const text = [
+      referenceText.trim() ? `# ${referenceTitle || "Geupload referentiebestand"}\n${referenceText}` : "",
+      ...databaseReferences.map((project) => `# ${project.title}\n${project.rawText}`),
+    ].filter(Boolean).join("\n\n---\n\n");
+    return { title, text };
+  }
+
   async function createStoryFromPrompt() {
     if (!storyPrompt.trim()) {
       setNotice("Geef eerst een verhaalprompt.");
@@ -446,13 +516,15 @@ export function App() {
     setStoryBusy(true);
     const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
     const presetLabel = storyNarrativePreset === "rich_intro" ? " met veel detail en lange intro" : "";
+    const sequelLabel = sequelSourceText ? ` als vervolg op ${sequelSourceTitle || "het gekozen verhaal"}` : "";
     setStoryStatus(
       storyMode === "deep"
-        ? `${providerLabel} ${activeModelLabel} schrijft uitgebreid${presetLabel}...`
-        : `${providerLabel} ${activeModelLabel} schrijft kort${presetLabel}...`,
+        ? `${providerLabel} ${activeModelLabel} schrijft uitgebreid${presetLabel}${sequelLabel}...`
+        : `${providerLabel} ${activeModelLabel} schrijft kort${presetLabel}${sequelLabel}...`,
     );
     setNotice("");
     try {
+      const references = combinedReferencePayload();
       const response = await generateStory(apiBase, {
         prompt: storyPrompt,
         pages: storyPages,
@@ -465,14 +537,40 @@ export function App() {
         provider: aiProvider,
         model: selectedAiModel || undefined,
         narrativePreset: storyNarrativePreset,
-        referenceTitle,
-        referenceText,
+        referenceTitle: references.title,
+        referenceText: references.text,
+        sequelOfTitle: sequelSourceTitle,
+        sequelOfText: sequelSourceText,
       });
       processText(response.title, response.story);
+      const savedAt = new Date().toISOString();
+      const generatedChapters = splitIntoChapters(response.story).chapters;
+      const generatedProject = {
+        schema: "bookreader.project.v1",
+        savedAt,
+        title: response.title,
+        rawText: response.story,
+        illustrationStyleId,
+        chapterIllustrations: [],
+        characterPortraits: [],
+        bookCover: { prompt: buildCoverPrompt(response.title, generatedChapters, illustrationStyleId) },
+      } satisfies BookProject;
+      saveStoryToLibrary(generatedProject);
+      let libraryNote = "";
+      try {
+        const inheritedCategoryIds = sequelSourceCategoryIds.length ? sequelSourceCategoryIds : selectedCategoryId ? [selectedCategoryId] : [];
+        const saved = await saveLibraryProject(apiBase, generatedProject, inheritedCategoryIds);
+        setCurrentLibraryProjectId(saved.project.id);
+        await refreshLibrary(false);
+        await refreshCategories(false);
+        libraryNote = " en in SQL opgeslagen";
+      } catch {
+        libraryNote = "";
+      }
       const responseProvider = response.provider === "deepseek-api" ? "API" : "lokaal";
       const languageNote = response.language ? `, ${response.language}` : "";
       setStoryStatus(`${responseProvider} ${response.model}: ${response.wordCount.toLocaleString("nl-NL")} woorden gemaakt${languageNote}`);
-      setNotice(`Verhaal geladen: ${response.title}`);
+      setNotice(`Verhaal geladen: ${response.title}${libraryNote}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Verhaal kon niet worden gemaakt.";
       setStoryStatus(message);
@@ -962,9 +1060,21 @@ export function App() {
         contextAnalysis,
         filmPlan,
       } satisfies BookProject;
+      let librarySaved = false;
+      let libraryError = "";
+      try {
+        const currentCategoryIds = libraryStories.find((entry) => entry.id === currentLibraryProjectId)?.categoryIds || [];
+        const saved = await saveLibraryProject(apiBase, libraryProject, currentCategoryIds.length ? currentCategoryIds : selectedCategoryId ? [selectedCategoryId] : []);
+        setCurrentLibraryProjectId(saved.project.id);
+        await refreshLibrary(false);
+        await refreshCategories(false);
+        librarySaved = true;
+      } catch (error) {
+        libraryError = error instanceof Error ? error.message : "SQL-bibliotheek niet bereikbaar";
+      }
       downloadBookProject(project);
       saveStoryToLibrary(libraryProject);
-      setNotice("Project opgeslagen.");
+      setNotice(librarySaved ? "Project opgeslagen in SQL en als JSON gedownload." : `Project als JSON opgeslagen. SQL niet bijgewerkt: ${libraryError}`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Project kon niet worden opgeslagen.");
     } finally {
@@ -982,6 +1092,7 @@ export function App() {
   }
 
   function clearDocument() {
+    setCurrentLibraryProjectId("");
     processText("Nieuw document", "");
     setRawText("");
     setChapters([]);
@@ -1053,6 +1164,234 @@ export function App() {
     }
   }
 
+  async function refreshLibrary(showNotice = true) {
+    setLibraryBusy(true);
+    try {
+      const response = await listLibraryProjects(apiBase);
+      setLibraryStories(response.projects);
+      const message = `${response.projects.length} SQL-verhalen beschikbaar`;
+      setLibraryStatus(message);
+      if (showNotice) setNotice(message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "SQL-bibliotheek kon niet worden geladen.";
+      setLibraryStatus("SQL-bibliotheek niet beschikbaar");
+      if (showNotice) setNotice(message);
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function refreshCategories(showNotice = true) {
+    try {
+      const response = await listLibraryCategories(apiBase);
+      setLibraryCategories(response.categories);
+      setAssignCategoryId((current) => current || response.categories[0]?.id || "");
+      if (showNotice) setNotice(`${response.categories.length} categorieën beschikbaar`);
+    } catch (error) {
+      if (showNotice) setNotice(error instanceof Error ? error.message : "Categorieën konden niet worden geladen.");
+    }
+  }
+
+  async function createCategory() {
+    const name = newCategoryName.trim();
+    if (!name) {
+      setNotice("Geef eerst een categorienaam.");
+      return;
+    }
+    setLibraryBusy(true);
+    try {
+      const response = await createLibraryCategory(apiBase, name);
+      setNewCategoryName("");
+      setAssignCategoryId(response.category.id);
+      setSelectedCategoryId(response.category.id);
+      await refreshCategories(false);
+      await refreshLibrary(false);
+      setNotice(`Categorie gemaakt: ${response.category.name}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Categorie kon niet worden gemaakt.");
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function assignCurrentStoryToCategory() {
+    const categoryId = assignCategoryId || selectedCategoryId;
+    if (!categoryId) {
+      setNotice("Maak of kies eerst een categorie.");
+      return;
+    }
+    if (!rawText.trim()) {
+      setNotice("Er is geen huidig verhaal om in een categorie te plaatsen.");
+      return;
+    }
+    setLibraryBusy(true);
+    try {
+      let projectId = currentLibraryProjectId;
+      if (!projectId) {
+        const saved = await saveLibraryProject(apiBase, currentBookProject(new Date().toISOString()), [categoryId]);
+        projectId = saved.project.id;
+        setCurrentLibraryProjectId(projectId);
+      } else {
+        await assignLibraryCategory(apiBase, projectId, categoryId);
+      }
+      await refreshLibrary(false);
+      await refreshCategories(false);
+      const categoryName = libraryCategories.find((category) => category.id === categoryId)?.name || "categorie";
+      setNotice(`${documentTitle} staat nu in ${categoryName}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Verhaal kon niet in de categorie worden geplaatst.");
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function assignLibraryStoryToCategory(projectId: string, categoryId: string) {
+    if (!projectId || !categoryId) return;
+    setLibraryBusy(true);
+    try {
+      const response = await assignLibraryCategory(apiBase, projectId, categoryId);
+      await refreshLibrary(false);
+      await refreshCategories(false);
+      const categoryName = response.project.categories.find((category) => category.id === categoryId)?.name || "categorie";
+      setNotice(`${response.project.title} staat nu in ${categoryName}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Verhaal kon niet in de categorie worden geplaatst.");
+    } finally {
+      setDraggedLibraryStoryId("");
+      setLibraryBusy(false);
+    }
+  }
+
+  async function dropStoryOnCategory(categoryId: string) {
+    if (!draggedLibraryStoryId) return;
+    await assignLibraryStoryToCategory(draggedLibraryStoryId, categoryId);
+  }
+
+  async function toggleReferenceStory(entry: LibraryProjectSummary) {
+    if (referenceStoryIds.includes(entry.id)) {
+      setReferenceStoryIds((current) => current.filter((id) => id !== entry.id));
+      setReferenceStoryProjects((current) => {
+        const next = { ...current };
+        delete next[entry.id];
+        return next;
+      });
+      setNotice(`${entry.title} is geen referentie meer.`);
+      return;
+    }
+
+    setLibraryBusy(true);
+    try {
+      const response = await openLibraryProject(apiBase, entry.id);
+      if (!isBookProject(response.project)) {
+        throw new Error("Dit SQL-record is geen geldig BookReader-project.");
+      }
+      setReferenceStoryProjects((current) => ({
+        ...current,
+        [entry.id]: {
+          title: response.project.title || entry.title,
+          rawText: response.project.rawText || "",
+        },
+      }));
+      setReferenceStoryIds((current) => (current.includes(entry.id) ? current : [...current, entry.id]));
+      setNotice(`${entry.title} toegevoegd als referentie.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Referentieverhaal kon niet worden geladen.");
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  function clearDatabaseReferences() {
+    setReferenceStoryIds([]);
+    setReferenceStoryProjects({});
+    setNotice("Database-referenties gewist.");
+  }
+
+  async function importJsonToLibrary() {
+    setLibraryBusy(true);
+    try {
+      const response = await importJsonProjectsToLibrary(apiBase);
+      await refreshLibrary(false);
+      await refreshCategories(false);
+      const message = `${response.imported} JSON-verhalen in SQL gezet`;
+      setLibraryStatus(message);
+      setNotice(message);
+      await refreshProjectFiles(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "JSON-verhalen konden niet naar SQL worden geïmporteerd.";
+      setLibraryStatus("import mislukt");
+      setNotice(message);
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function openLibraryStory(entry: LibraryProjectSummary) {
+    setProjectBusy(true);
+    try {
+      const response = await openLibraryProject(apiBase, entry.id);
+      if (!isBookProject(response.project)) {
+        throw new Error("Dit SQL-record is geen geldig BookReader-project.");
+      }
+      loadBookProject(response.project, entry.id);
+      setNotice(`${entry.title} geopend uit SQL-bibliotheek.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "SQL-verhaal kon niet worden geopend.");
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
+  async function chooseSequelSource(projectId: string) {
+    if (!projectId) {
+      clearSequelSource();
+      return;
+    }
+    setLibraryBusy(true);
+    setSequelStatus("vervolgbron wordt geladen...");
+    try {
+      const response = await openLibraryProject(apiBase, projectId);
+      if (!isBookProject(response.project)) {
+        throw new Error("Dit SQL-record is geen geldig BookReader-project.");
+      }
+      const summary = response.summary || libraryStories.find((entry) => entry.id === projectId);
+      setSequelSourceId(projectId);
+      setSequelSourceTitle(response.project.title || summary?.title || "Gekozen verhaal");
+      setSequelSourceText(response.project.rawText || "");
+      setSequelSourceCategoryIds(summary?.categoryIds || []);
+      setSequelStatus(`vervolg op: ${response.project.title || summary?.title || "gekozen verhaal"}`);
+      setNotice(`Vervolgbron gekozen: ${response.project.title || summary?.title || "gekozen verhaal"}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Vervolgbron kon niet worden geladen.";
+      setSequelStatus(message);
+      setNotice(message);
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  function chooseCurrentStoryAsSequelSource() {
+    if (!rawText.trim()) {
+      setNotice("Er is geen huidig verhaal om als vervolgbron te gebruiken.");
+      return;
+    }
+    const active = libraryStories.find((entry) => entry.id === currentLibraryProjectId);
+    setSequelSourceId(currentLibraryProjectId);
+    setSequelSourceTitle(documentTitle || "Huidig verhaal");
+    setSequelSourceText(rawText);
+    setSequelSourceCategoryIds(active?.categoryIds || []);
+    setSequelStatus(`vervolg op huidig verhaal: ${documentTitle || "Huidig verhaal"}`);
+    setNotice("Het huidige verhaal is ingesteld als vervolgbron.");
+  }
+
+  function clearSequelSource() {
+    setSequelSourceId("");
+    setSequelSourceTitle("");
+    setSequelSourceText("");
+    setSequelSourceCategoryIds([]);
+    setSequelStatus("geen vervolgbron");
+  }
+
   async function openProjectFileEntry(entry: ProjectFileSummary) {
     setProjectBusy(true);
     try {
@@ -1086,18 +1425,133 @@ export function App() {
             <Clock size={17} />
             <span>Verhalen</span>
           </div>
+          <button type="button" className="quiet" onClick={() => void refreshLibrary(true)} disabled={libraryBusy}>
+            {libraryBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
+            <span>Scan SQL</span>
+          </button>
+          <button type="button" className="quiet" onClick={() => void importJsonToLibrary()} disabled={libraryBusy}>
+            {libraryBusy ? <Loader2 size={16} /> : <Save size={16} />}
+            <span>JSON naar SQL</span>
+          </button>
           <button type="button" className="quiet" onClick={() => void refreshProjectFiles(true)} disabled={projectScanBusy}>
             {projectScanBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
             <span>Scan JSON</span>
           </button>
-          {savedStories.length || scannedStoryFiles.length ? (
+          <div className="button-row">
+            <label className="field compact-field">
+              <span>Categorie</span>
+              <select value={selectedCategoryId} onChange={(event) => setSelectedCategoryId(event.target.value)}>
+                <option value="">Alle SQL-verhalen</option>
+                {libraryCategories.map((category) => (
+                  <option value={category.id} key={category.id}>
+                    {category.name} ({category.projectCount})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field compact-field">
+              <span>Nieuwe categorie</span>
+              <input value={newCategoryName} onChange={(event) => setNewCategoryName(event.target.value)} />
+            </label>
+            <button
+              type="button"
+              className="quiet icon-button model-refresh-button"
+              onClick={() => void createCategory()}
+              disabled={libraryBusy || !newCategoryName.trim()}
+              title="Categorie maken"
+              aria-label="Categorie maken"
+            >
+              <Plus size={16} />
+            </button>
+          </div>
+          {libraryCategories.length ? (
+            <div className="category-drop-list">
+              {libraryCategories.map((category) => (
+                <button
+                  type="button"
+                  className={`quiet category-drop-zone ${draggedLibraryStoryId ? "drop-ready" : ""}`}
+                  key={category.id}
+                  onClick={() => setSelectedCategoryId(category.id)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    void dropStoryOnCategory(category.id);
+                  }}
+                  title="Sleep een SQL-verhaal hierheen om het in deze categorie te plaatsen"
+                >
+                  <Tag size={14} />
+                  <span>{category.name}</span>
+                  <small>{category.projectCount}</small>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <div className="button-row">
+            <label className="field compact-field">
+              <span>Plaats huidig in</span>
+              <select value={assignCategoryId} onChange={(event) => setAssignCategoryId(event.target.value)} disabled={!libraryCategories.length}>
+                {libraryCategories.length ? (
+                  libraryCategories.map((category) => (
+                    <option value={category.id} key={category.id}>
+                      {category.name}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">Geen categorieën</option>
+                )}
+              </select>
+            </label>
+            <button type="button" className="quiet" onClick={() => void assignCurrentStoryToCategory()} disabled={libraryBusy || !assignCategoryId || !rawText.trim()}>
+              {libraryBusy ? <Loader2 size={16} /> : <Tag size={16} />}
+              <span>Plaats</span>
+            </button>
+          </div>
+          {activeStoryCategoryNames ? <p className="voice-style-note">Huidig verhaal: {activeStoryCategoryNames}</p> : null}
+          {referenceStoryIds.length ? (
+            <div className="button-row">
+              <p className="voice-style-note reference-count">{referenceStoryIds.length} databaseverhaal als referentie</p>
+              <button type="button" className="quiet" onClick={clearDatabaseReferences}>
+                <Trash2 size={16} />
+                <span>Wis refs</span>
+              </button>
+            </div>
+          ) : null}
+          {visibleLibraryStories.length || (!selectedCategoryId && (localStoryEntries.length || scannedStoryFiles.length)) ? (
             <div className="saved-story-list">
-              {savedStories.map((entry) => (
+              {visibleLibraryStories.map((entry) => (
+                <article
+                  className="saved-story-item library-story-item"
+                  draggable
+                  key={entry.id}
+                  onDragStart={() => setDraggedLibraryStoryId(entry.id)}
+                  onDragEnd={() => setDraggedLibraryStoryId("")}
+                >
+                  <label className="reference-toggle" title="Gebruik dit verhaal als referentie">
+                    <input
+                      type="checkbox"
+                      checked={referenceStoryIds.includes(entry.id)}
+                      onChange={() => void toggleReferenceStory(entry)}
+                    />
+                    <span>Ref</span>
+                  </label>
+                  <button type="button" className="saved-story-open quiet" onClick={() => void openLibraryStory(entry)} title={entry.sourcePath || entry.title}>
+                    <strong>{entry.title}</strong>
+                    <small>
+                      SQL · {formatSavedAt(entry.savedAt)} · {entry.wordCount.toLocaleString("nl-NL")} woorden · {entry.chapterCount} hoofdstukken
+                    </small>
+                    <span>{entry.categories.length ? `${entry.categories.map((category) => category.name).join(", ")} · ${entry.preview}` : entry.preview}</span>
+                  </button>
+                  <button type="button" className="quiet icon-button" onClick={() => void chooseSequelSource(entry.id)} title="Maak vervolg op dit verhaal">
+                    <ArrowRight size={15} />
+                  </button>
+                </article>
+              ))}
+              {!selectedCategoryId ? localStoryEntries.map((entry) => (
                 <article className="saved-story-item" key={entry.id}>
                   <button type="button" className="saved-story-open quiet" onClick={() => openSavedStory(entry)} title={entry.title}>
                     <strong>{entry.title}</strong>
                     <small>
-                      {formatSavedAt(entry.savedAt)} · {entry.wordCount.toLocaleString("nl-NL")} woorden · {entry.chapterCount} hoofdstukken
+                      Browser · {formatSavedAt(entry.savedAt)} · {entry.wordCount.toLocaleString("nl-NL")} woorden · {entry.chapterCount} hoofdstukken
                     </small>
                     <span>{entry.preview}</span>
                   </button>
@@ -1105,8 +1559,8 @@ export function App() {
                     <Trash2 size={15} />
                   </button>
                 </article>
-              ))}
-              {scannedStoryFiles.map((entry) => (
+              )) : null}
+              {!selectedCategoryId ? scannedStoryFiles.map((entry) => (
                 <article className="saved-story-item file-story-item" key={entry.id}>
                   <button type="button" className="saved-story-open quiet" onClick={() => void openProjectFileEntry(entry)} title={entry.filePath}>
                     <strong>{entry.title}</strong>
@@ -1116,12 +1570,16 @@ export function App() {
                     <span>{entry.fileName}</span>
                   </button>
                 </article>
-              ))}
+              )) : null}
             </div>
           ) : (
-            <p className="voice-style-note">Nog geen opgeslagen verhalen. {projectScanStatus}</p>
+            <p className="voice-style-note">Nog geen opgeslagen verhalen. {libraryStatus}; {projectScanStatus}</p>
           )}
-          {savedStories.length || scannedStoryFiles.length ? <p className="voice-style-note">{projectScanStatus}</p> : null}
+          {visibleLibraryStories.length || (!selectedCategoryId && (localStoryEntries.length || scannedStoryFiles.length)) ? (
+            <p className="voice-style-note">
+              {libraryStatus}; {projectScanStatus}
+            </p>
+          ) : null}
         </section>
 
         <section className="tool-panel">
@@ -1185,6 +1643,28 @@ export function App() {
             <textarea value={storyPrompt} onChange={(event) => setStoryPrompt(event.target.value)} rows={5} />
           </label>
           <label className="field">
+            <span>Vervolg op</span>
+            <select value={sequelSourceId} onChange={(event) => void chooseSequelSource(event.target.value)} disabled={libraryBusy || !libraryStories.length}>
+              <option value="">Geen vervolgbron</option>
+              {libraryStories.map((entry) => (
+                <option value={entry.id} key={entry.id}>
+                  {entry.title} · {formatSavedAt(entry.savedAt)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="button-row">
+            <button type="button" className="quiet" onClick={chooseCurrentStoryAsSequelSource} disabled={!rawText.trim()}>
+              <ArrowRight size={16} />
+              <span>Vervolg huidig</span>
+            </button>
+            <button type="button" className="quiet" onClick={clearSequelSource} disabled={!sequelSourceText}>
+              <Trash2 size={16} />
+              <span>Wis vervolg</span>
+            </button>
+          </div>
+          <p className="voice-style-note">{sequelStatus}</p>
+          <label className="field">
             <span>Genre</span>
             <input value={storyGenre} onChange={(event) => setStoryGenre(event.target.value)} />
           </label>
@@ -1229,6 +1709,12 @@ export function App() {
             hidden
           />
           <p className="voice-style-note">{referenceStatus}</p>
+          {referenceStoryIds.length ? (
+            <p className="voice-style-note">
+              {referenceStoryIds.length} databaseverhaal geselecteerd als referentie:{" "}
+              {referenceStoryIds.map((id) => referenceStoryProjects[id]?.title).filter(Boolean).join(", ")}
+            </p>
+          ) : null}
           <div className="button-row">
             <label className="field compact-field">
               <span>Pagina's</span>

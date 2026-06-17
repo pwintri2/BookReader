@@ -45,6 +45,20 @@ try:
     conn.close()
 
     conn = http.client.HTTPConnection(host, port, timeout=1.0)
+    conn.request("GET", "/api/library/list")
+    response = conn.getresponse()
+    library_payload = json.loads(response.read().decode("utf-8") or "{}")
+    library_ok = response.status == 200 and isinstance(library_payload.get("projects"), list)
+    conn.close()
+
+    conn = http.client.HTTPConnection(host, port, timeout=1.0)
+    conn.request("GET", "/api/library/categories")
+    response = conn.getresponse()
+    categories_payload = json.loads(response.read().decode("utf-8") or "{}")
+    categories_ok = response.status == 200 and isinstance(categories_payload.get("categories"), list)
+    conn.close()
+
+    conn = http.client.HTTPConnection(host, port, timeout=1.0)
     conn.request("GET", "/api/health")
     response = conn.getresponse()
     health_payload = json.loads(response.read().decode("utf-8") or "{}")
@@ -68,7 +82,7 @@ finally:
     except Exception:
         pass
 
-sys.exit(0 if projects_ok and film_ok and models_ok else 1)
+sys.exit(0 if projects_ok and library_ok and categories_ok and film_ok and models_ok else 1)
 PY
 }
 

@@ -16,6 +16,9 @@ const OUTPUT_DIR = resolve(process.env.BOOKREADER_OUTPUT_DIR || join(PROJECT_ROO
 const AUDIO_DIR = join(OUTPUT_DIR, "audio");
 const IMAGES_DIR = join(OUTPUT_DIR, "images");
 const PROJECTS_DIR = resolve(process.env.BOOKREADER_PROJECTS_DIR || join(OUTPUT_DIR, "projects"));
+const SQLITE_DB = resolve(process.env.BOOKREADER_SQLITE_DB || join(OUTPUT_DIR, "bookreader.sqlite"));
+const SQLITE_TOOL = join(PROJECT_ROOT, "scripts/bookreader_sqlite.py");
+const PYTHON_BIN = process.env.BOOKREADER_PYTHON_BIN || "python3";
 const VOICES_DIR = resolve(process.env.BOOKREADER_PIPER_VOICES_DIR || join(OUTPUT_DIR, "voices"));
 const PIPER_BIN = process.env.BOOKREADER_PIPER_BIN || autoPiperBinary();
 const PIPER_MODEL = process.env.BOOKREADER_PIPER_MODEL || "";
@@ -308,6 +311,41 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/library/list") {
+      await handleLibraryList(res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/api/library/open/")) {
+      await handleLibraryOpen(url, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/save") {
+      await handleLibrarySave(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/import-json") {
+      await handleLibraryImportJson(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/library/categories") {
+      await handleLibraryCategories(res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/categories") {
+      await handleLibraryCategoryCreate(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/categories/assign") {
+      await handleLibraryCategoryAssign(req, res);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/tts/synthesize") {
       await handleTts(req, res);
       return;
@@ -426,6 +464,8 @@ function healthPayload() {
     },
     storage: {
       outputDir: OUTPUT_DIR,
+      sqliteDb: SQLITE_DB,
+      sqliteAvailable: existsSync(SQLITE_TOOL),
       audioFiles: safeAudioCount(),
       imageFiles: safeImageCount(),
     },
@@ -611,6 +651,81 @@ async function handleProjectOpen(url, res) {
     filePath,
     project: record.project,
   });
+}
+
+async function handleLibraryList(res) {
+  const payload = await runSqliteTool(["list", "--db", SQLITE_DB]);
+  await sendJson(res, 200, payload);
+}
+
+async function handleLibraryOpen(url, res) {
+  const id = decodeURIComponent(url.pathname.replace("/api/library/open/", ""));
+  const payload = await runSqliteTool(["open", "--db", SQLITE_DB, "--id", id]);
+  if (!payload.ok) {
+    await sendJson(res, 404, payload);
+    return;
+  }
+  await sendJson(res, 200, payload);
+}
+
+async function handleLibrarySave(req, res) {
+  const body = await readJson(req);
+  if (!isBookReaderProject(body.project)) {
+    await sendJson(res, 400, { ok: false, error: "invalid_project" });
+    return;
+  }
+
+  const payload = await runSqliteTool(
+    ["save", "--db", SQLITE_DB],
+    JSON.stringify({
+      project: normalizeBookReaderProject(body.project, new Date().toISOString()),
+      categoryIds: Array.isArray(body.categoryIds) ? body.categoryIds.map((item) => String(item || "").trim()).filter(Boolean) : [],
+      sourcePath: typeof body.sourcePath === "string" ? body.sourcePath : undefined,
+      fileName: typeof body.fileName === "string" ? body.fileName : undefined,
+    }),
+  );
+  await sendJson(res, payload.ok ? 200 : 400, payload);
+}
+
+async function handleLibraryImportJson(req, res) {
+  const body = await readJson(req);
+  const bodyPaths = Array.isArray(body.paths) ? body.paths.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  const paths = bodyPaths.length ? bodyPaths : projectSearchDirs();
+  const args = ["import", "--db", SQLITE_DB];
+  for (const dirPath of paths) args.push("--path", dirPath);
+  const payload = await runSqliteTool(args);
+  await sendJson(res, payload.ok ? 200 : 400, {
+    ...payload,
+    scannedDirs: paths,
+  });
+}
+
+async function handleLibraryCategories(res) {
+  const payload = await runSqliteTool(["categories", "--db", SQLITE_DB]);
+  await sendJson(res, 200, payload);
+}
+
+async function handleLibraryCategoryCreate(req, res) {
+  const body = await readJson(req);
+  const name = String(body.name || "").trim();
+  if (!name) {
+    await sendJson(res, 400, { ok: false, error: "empty_category_name" });
+    return;
+  }
+  const payload = await runSqliteTool(["create-category", "--db", SQLITE_DB, "--name", name]);
+  await sendJson(res, 200, payload);
+}
+
+async function handleLibraryCategoryAssign(req, res) {
+  const body = await readJson(req);
+  const projectId = String(body.projectId || "").trim();
+  const categoryId = String(body.categoryId || "").trim();
+  if (!projectId || !categoryId) {
+    await sendJson(res, 400, { ok: false, error: "missing_category_assignment" });
+    return;
+  }
+  const payload = await runSqliteTool(["assign-category", "--db", SQLITE_DB, "--project-id", projectId, "--category-id", categoryId]);
+  await sendJson(res, payload.ok ? 200 : 404, payload);
 }
 
 function projectSearchDirs() {
@@ -954,6 +1069,9 @@ async function handleStoryGenerate(req, res) {
   const referenceTitle = String(body.referenceTitle || "").slice(0, 220);
   const referenceText = normalizeText(body.referenceText || "").slice(0, REFERENCE_MAX_CHARS);
   const referenceGuide = buildReferenceGuide({ referenceTitle, referenceText, language });
+  const sequelOfTitle = String(body.sequelOfTitle || "").slice(0, 220);
+  const sequelOfText = normalizeText(body.sequelOfText || "").slice(0, REFERENCE_MAX_CHARS);
+  const sequelGuide = buildReferenceGuide({ referenceTitle: sequelOfTitle, referenceText: sequelOfText, language });
 
   if (!prompt) {
     await sendJson(res, 400, { ok: false, error: "empty_prompt" });
@@ -974,6 +1092,9 @@ async function handleStoryGenerate(req, res) {
     narrativePreset,
     referenceGuide,
     referenceText,
+    sequelOfTitle,
+    sequelOfText,
+    sequelGuide,
   });
 
   if (provider === "api") {
@@ -2203,9 +2324,15 @@ function buildStoryGenerationPrompt({
   narrativePreset,
   referenceGuide,
   referenceText,
+  sequelOfTitle,
+  sequelOfText,
+  sequelGuide,
 }) {
   const referenceBlock = referenceGuide
     ? `\nReference story bible:\n${referenceGuide}\n\nReference excerpt for continuity, character history and voice. Use it as background; do not copy passages verbatim unless the user explicitly asks for a rewrite:\n${truncate(referenceText, 9000)}\n`
+    : "";
+  const sequelBlock = sequelGuide
+    ? `\nSequel source story:\n${sequelGuide}\n\nThis new story is a continuation of "${sequelOfTitle || "the selected source story"}". Continue after, or as a direct consequence of, the source story. Preserve established characters, names, relationships, setting, unresolved threads, emotional state, and the ending conditions of the source. Do not retell or summarize the old story as the main output; write the next story. Use this source excerpt for continuity and voice:\n${truncate(sequelOfText, 12000)}\n`
     : "";
   const richIntroRules =
     narrativePreset === "rich_intro"
@@ -2245,12 +2372,14 @@ Story quality rules:
 - Do not sexualize characters. If the idea mentions a child, girl, boy, teenager or young person, keep body descriptions neutral and age-appropriate.
 - Do not add intimate body details, fetish clothing, or strange clothing words when the user did not ask for them.
 - Do not invent a completely different village, mountains, war, royal court, monsters, or other large setting unless the user asks for it.
+- If a sequel source story is provided, this output must be a vervolg/sequel: keep continuity with the selected database story and make the user's prompt the new episode, conflict, or next arc.
 - Keep chapters/pages readable aloud.
 
 Genre: ${genre}
 Audience: ${audience}
 Tone: ${tone}
 ${referenceBlock}
+${sequelBlock}
 
 User idea:
 ${prompt}
@@ -3245,6 +3374,52 @@ function collectComfyImages(entry) {
     }
   }
   return images;
+}
+
+async function runSqliteTool(args, input = "") {
+  if (!existsSync(SQLITE_TOOL)) {
+    throw new Error(`BookReader SQLite helper ontbreekt: ${SQLITE_TOOL}`);
+  }
+
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(PYTHON_BIN, [SQLITE_TOOL, ...args], {
+      cwd: PROJECT_ROOT,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", (error) => rejectPromise(error));
+    child.on("close", (code) => {
+      const out = Buffer.concat(stdout).toString("utf8").trim();
+      const err = Buffer.concat(stderr).toString("utf8").trim();
+      if (code !== 0) {
+        const parsedError = parseJsonObject(err) || parseJsonObject(out);
+        rejectPromise(new Error(parsedError?.message || err || `SQLite helper stopte met code ${code}`));
+        return;
+      }
+      const payload = parseJsonObject(out);
+      if (!payload) {
+        rejectPromise(new Error("SQLite helper gaf geen geldige JSON terug."));
+        return;
+      }
+      resolvePromise(payload);
+    });
+
+    if (input) child.stdin.write(input);
+    child.stdin.end();
+  });
+}
+
+function parseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(String(value || ""));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 async function readJson(req) {

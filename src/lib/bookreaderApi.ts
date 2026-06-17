@@ -51,6 +51,8 @@ export type ApiHealth = {
   };
   storage?: {
     outputDir: string;
+    sqliteDb?: string;
+    sqliteAvailable?: boolean;
     audioFiles: number;
     imageFiles?: number;
   };
@@ -107,6 +109,8 @@ export type StoryGenerateRequest = {
   narrativePreset?: "balanced" | "rich_intro";
   referenceTitle?: string;
   referenceText?: string;
+  sequelOfTitle?: string;
+  sequelOfText?: string;
 };
 
 export type StoryGenerateResponse = {
@@ -312,6 +316,74 @@ export type ProjectFileOpenResponse = {
   project: BookProject;
 };
 
+export type LibraryProjectSummary = {
+  id: string;
+  title: string;
+  savedAt: string;
+  wordCount: number;
+  chapterCount: number;
+  preview: string;
+  fileName: string;
+  sourcePath: string;
+  updatedAt: string;
+  categories: LibraryCategory[];
+  categoryIds: string[];
+};
+
+export type LibraryCategory = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  projectCount: number;
+};
+
+export type LibraryListResponse = {
+  ok: boolean;
+  dbPath: string;
+  projects: LibraryProjectSummary[];
+};
+
+export type LibraryOpenResponse = {
+  ok: boolean;
+  project: BookProject;
+  summary: LibraryProjectSummary;
+};
+
+export type LibrarySaveResponse = {
+  ok: boolean;
+  dbPath: string;
+  project: LibraryProjectSummary;
+};
+
+export type LibraryImportResponse = {
+  ok: boolean;
+  dbPath: string;
+  imported: number;
+  skipped: number;
+  scannedDirs: string[];
+  projects: LibraryProjectSummary[];
+};
+
+export type LibraryCategoryListResponse = {
+  ok: boolean;
+  dbPath: string;
+  categories: LibraryCategory[];
+};
+
+export type LibraryCategoryCreateResponse = {
+  ok: boolean;
+  dbPath: string;
+  category: LibraryCategory;
+};
+
+export type LibraryCategoryAssignResponse = {
+  ok: boolean;
+  dbPath: string;
+  project: LibraryProjectSummary;
+  categories: LibraryCategory[];
+};
+
 export function normalizeApiBase(value: string): string {
   return value.trim().replace(/\/+$/, "");
 }
@@ -337,6 +409,46 @@ export async function listProjectFiles(apiBase: string): Promise<ProjectFileList
 
 export async function openProjectFile(apiBase: string, id: string): Promise<ProjectFileOpenResponse> {
   return requestJson<ProjectFileOpenResponse>(apiBase, `/api/projects/open/${encodeURIComponent(id)}`);
+}
+
+export async function listLibraryProjects(apiBase: string): Promise<LibraryListResponse> {
+  return requestJson<LibraryListResponse>(apiBase, "/api/library/list");
+}
+
+export async function openLibraryProject(apiBase: string, id: string): Promise<LibraryOpenResponse> {
+  return requestJson<LibraryOpenResponse>(apiBase, `/api/library/open/${encodeURIComponent(id)}`);
+}
+
+export async function saveLibraryProject(apiBase: string, project: BookProject, categoryIds: string[] = []): Promise<LibrarySaveResponse> {
+  return requestJson<LibrarySaveResponse>(apiBase, "/api/library/save", {
+    method: "POST",
+    body: JSON.stringify({ project, categoryIds }),
+  });
+}
+
+export async function importJsonProjectsToLibrary(apiBase: string): Promise<LibraryImportResponse> {
+  return requestJson<LibraryImportResponse>(apiBase, "/api/library/import-json", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function listLibraryCategories(apiBase: string): Promise<LibraryCategoryListResponse> {
+  return requestJson<LibraryCategoryListResponse>(apiBase, "/api/library/categories");
+}
+
+export async function createLibraryCategory(apiBase: string, name: string): Promise<LibraryCategoryCreateResponse> {
+  return requestJson<LibraryCategoryCreateResponse>(apiBase, "/api/library/categories", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function assignLibraryCategory(apiBase: string, projectId: string, categoryId: string): Promise<LibraryCategoryAssignResponse> {
+  return requestJson<LibraryCategoryAssignResponse>(apiBase, "/api/library/categories/assign", {
+    method: "POST",
+    body: JSON.stringify({ projectId, categoryId }),
+  });
 }
 
 export async function synthesizeSpeech(apiBase: string, payload: TtsRequest): Promise<TtsResponse> {
