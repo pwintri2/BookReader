@@ -31,11 +31,14 @@ import {
   AiProvider,
   ApiHealth,
   analyzeContext,
+  BookMakerMessage,
   cacheImage,
   ContextAnalysis,
+  continueBookMakerInterview,
   FilmPlan,
   assignLibraryCategory,
   deleteLibraryProject,
+  finalizeBookMakerPrompt,
   generateIllustration,
   generateStory,
   getHealth,
@@ -85,6 +88,7 @@ import {
 
 type SpeechState = "idle" | "speaking" | "paused";
 type TtsProvider = "browser" | "server";
+type WorkspaceTab = "reader" | "bookMaker";
 type VoiceStyleId = "neutral" | "story" | "lively" | "calm";
 type StoryLanguage = "Auto" | "Nederlands" | "English" | "Deutsch" | "Français" | "Español";
 type StoryNarrativePreset = "balanced" | "rich_intro";
@@ -200,7 +204,14 @@ const sampleText = [
   "Per hoofdstuk kan een lokale stem worden gekozen. De app bewaart geen tekst buiten deze sessie.",
 ].join("\n");
 
+const INITIAL_TALLE_MESSAGE: BookMakerMessage = {
+  role: "talle",
+  content:
+    "Lieve John, kom, laten we niet meteen naar de betekenis springen. Neem me eerst mee naar het eerste beeld. Waar zijn we, en wat zie jij als het begin van deze reis?",
+};
+
 export function App() {
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("reader");
   const [documentTitle, setDocumentTitle] = useState("Nieuw document");
   const [rawText, setRawText] = useState(sampleText);
   const [chapters, setChapters] = useState<Chapter[]>(() => splitIntoChapters(sampleText).chapters);
@@ -305,6 +316,11 @@ export function App() {
   const [projectFiles, setProjectFiles] = useState<ProjectFileSummary[]>([]);
   const [projectScanBusy, setProjectScanBusy] = useState(false);
   const [projectScanStatus, setProjectScanStatus] = useState("JSON-bestanden nog niet gescand");
+  const [bookMakerMessages, setBookMakerMessages] = useState<BookMakerMessage[]>([INITIAL_TALLE_MESSAGE]);
+  const [bookMakerInput, setBookMakerInput] = useState("");
+  const [bookMakerBusy, setBookMakerBusy] = useState(false);
+  const [bookMakerStatus, setBookMakerStatus] = useState("Talle wacht op de eerste scène.");
+  const [bookMakerPromptPreview, setBookMakerPromptPreview] = useState("");
   const [query, setQuery] = useState("");
   const [isParsing, setIsParsing] = useState(false);
   const [notice, setNotice] = useState("");
@@ -750,6 +766,195 @@ export function App() {
       setNotice(message);
     } finally {
       setStoryBusy(false);
+    }
+  }
+
+  async function sendBookMakerAnswer() {
+    const answer = bookMakerInput.trim();
+    if (!answer) {
+      setNotice("Schrijf eerst een antwoord voor Talle.");
+      return;
+    }
+    const johnMessage: BookMakerMessage = { role: "john", content: answer, createdAt: new Date().toISOString() };
+    const nextMessages = [...bookMakerMessages, johnMessage];
+    setBookMakerMessages(nextMessages);
+    setBookMakerInput("");
+    setBookMakerBusy(true);
+    setBookMakerStatus(`${aiProviderLabel(aiProvider)} ${activeModelLabel} laat Talle doorvragen...`);
+    setNotice("");
+    try {
+      const response = await continueBookMakerInterview(apiBase, {
+        messages: nextMessages,
+        provider: aiProvider,
+        model: selectedAiModel || undefined,
+        mode: storyMode,
+      });
+      const talMessage: BookMakerMessage = { role: "talle", content: response.reply, createdAt: new Date().toISOString() };
+      setBookMakerMessages([...nextMessages, talMessage]);
+      const fallbackNote = response.fallbackUsed ? " met lokale fallback" : "";
+      setBookMakerStatus(`Talle luistert verder (${responseProviderLabel(response.provider)} ${response.model}${fallbackNote}).`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Talle kon nu niet antwoorden.";
+      setBookMakerStatus(message);
+      setNotice(message);
+    } finally {
+      setBookMakerBusy(false);
+    }
+  }
+
+  function resetBookMakerSession() {
+    setBookMakerMessages([INITIAL_TALLE_MESSAGE]);
+    setBookMakerInput("");
+    setBookMakerPromptPreview("");
+    setBookMakerStatus("Nieuwe Boek-maker-sessie gestart.");
+  }
+
+  async function finishBookMakerSession() {
+    if (!bookMakerMessages.some((message) => message.role === "john" && message.content.trim())) {
+      setNotice("Beantwoord eerst minstens een vraag van Talle.");
+      return;
+    }
+    setBookMakerBusy(true);
+    setStoryBusy(true);
+    setImageProvider("grok");
+    const targetLanguage = storyLanguage === "Auto" ? "Nederlands" : storyLanguage;
+    setBookMakerStatus(`${aiProviderLabel(aiProvider)} ${activeModelLabel} vormt het interview om tot prompt...`);
+    setStoryStatus("Boek-maker maakt een verhaal van 6 hoofdstukken...");
+    setNotice("");
+    try {
+      const promptResponse = await finalizeBookMakerPrompt(apiBase, {
+        messages: bookMakerMessages,
+        provider: aiProvider,
+        model: selectedAiModel || undefined,
+        mode: storyMode,
+        language: targetLanguage,
+      });
+      const nextPromptMeta: StoryPromptMeta = {
+        characters: promptResponse.characters,
+        plot: promptResponse.plot,
+        mainEvent: promptResponse.mainEvent,
+        prompt: promptResponse.prompt,
+        updatedAt: new Date().toISOString(),
+      };
+      setStoryPrompt(promptResponse.prompt);
+      setStoryPromptMeta(nextPromptMeta);
+      setPromptDraft(promptResponse.prompt);
+      setPromptCharacters(promptResponse.characters);
+      setPromptPlot(promptResponse.plot);
+      setPromptMainEvent(promptResponse.mainEvent);
+      setStoryPages(6);
+      setStoryWordsPerPage(750);
+      setStoryMode("deep");
+      setStoryNarrativePreset("rich_intro");
+      setStoryLanguage(targetLanguage as StoryLanguage);
+      setBookMakerPromptPreview(promptResponse.prompt);
+      setBookMakerStatus("Prompt klaar; Talle laat het verhaal schrijven...");
+
+      const response = await generateStory(apiBase, {
+        prompt: promptResponse.prompt,
+        pages: 6,
+        wordsPerPage: 750,
+        genre: "persoonlijke spirituele fictieroman",
+        tone: "warm, concreet, literair, invoelend en licht ironisch",
+        audience: "lezers van persoonlijke spirituele fictie met concrete scènes en innerlijke betekenis",
+        language: targetLanguage,
+        mode: "deep",
+        provider: aiProvider,
+        model: selectedAiModel || undefined,
+        narrativePreset: "rich_intro",
+      });
+
+      processText(response.title, response.story);
+      const generatedChapters = splitIntoChapters(response.story).chapters;
+      const cover = { prompt: buildCoverPrompt(response.title, generatedChapters, illustrationStyleId) };
+      setBookCover(cover);
+      setChapterIllustrations({});
+      setIllustrationUrl("");
+      setIllustrationJobId("");
+      setBookMakerStatus("Verhaal klaar; Grok maakt illustraties per hoofdstuk...");
+      const illustrationMap = await createBookMakerChapterIllustrations(response.title, generatedChapters);
+      const savedAt = new Date().toISOString();
+      const generatedProject = {
+        schema: "bookreader.project.v1",
+        savedAt,
+        title: response.title,
+        rawText: response.story,
+        illustrationStyleId,
+        chapterIllustrations: Object.values(illustrationMap),
+        characterPortraits: [],
+        bookCover: cover,
+        storyPrompt: nextPromptMeta,
+      } satisfies BookProject;
+      saveStoryToLibrary(generatedProject);
+      let libraryNote = "";
+      try {
+        const saved = await saveLibraryProject(apiBase, generatedProject, selectedCategoryId ? [selectedCategoryId] : []);
+        setCurrentLibraryProjectId(saved.project.id);
+        await refreshLibrary(false);
+        await refreshCategories(false);
+        libraryNote = " en in SQL opgeslagen";
+      } catch {
+        libraryNote = "";
+      }
+      const imageCount = Object.keys(illustrationMap).length;
+      const promptNote = promptResponse.fallbackUsed ? " Promptfallback gebruikt." : "";
+      setBookMakerStatus(`Boek-maker klaar: ${generatedChapters.length} hoofdstukken, ${imageCount} Grok-illustraties.${promptNote}`);
+      setStoryStatus(`${responseProviderLabel(response.provider)} ${response.model}: ${response.wordCount.toLocaleString("nl-NL")} woorden gemaakt`);
+      setNotice(`Boek-maker verhaal geladen: ${response.title}${libraryNote}.`);
+      setWorkspaceTab("reader");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Boek-maker kon de sessie niet afronden.";
+      setBookMakerStatus(message);
+      setStoryStatus(message);
+      setNotice(message);
+    } finally {
+      setStoryBusy(false);
+      setBookMakerBusy(false);
+    }
+  }
+
+  async function createBookMakerChapterIllustrations(title: string, chapterList: Chapter[]): Promise<ChapterIllustrationMap> {
+    const nextMap: ChapterIllustrationMap = {};
+    setIllustrationBusy(true);
+    setIllustrationStatus("Grok maakt boekillustraties...");
+    try {
+      for (const chapter of chapterList) {
+        const prompt = buildIllustrationPrompt(title, chapter, illustrationStyleId);
+        setIllustrationStatus(`Grok illustreert ${chapter.title}...`);
+        setBookMakerStatus(`Grok illustreert ${chapter.index + 1}/${chapterList.length}: ${chapter.title}`);
+        const job = await generateIllustration(apiBase, {
+          prompt,
+          negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+          provider: "grok",
+          model: selectedGrokImageModel || modelCatalog?.defaults.xai.image,
+          kind: "chapter",
+          label: chapter.title,
+          aspectRatio: "4:3",
+        });
+        const resolved = await resolveImageJob(job, "chapter", chapter.title);
+        if (!resolved.imageUrl) continue;
+        const record = {
+          chapterId: chapter.id,
+          prompt,
+          imageUrl: resolved.imageUrl,
+          jobId: resolved.jobId,
+        };
+        nextMap[chapter.id] = record;
+        setChapterIllustrations((previous) => ({ ...previous, [chapter.id]: record }));
+        if (!illustrationUrl || chapter.index === 0) {
+          setIllustrationUrl(resolved.imageUrl);
+          setIllustrationJobId(resolved.jobId);
+        }
+      }
+      setIllustrationStatus(`${Object.keys(nextMap).length} Grok-illustraties klaar`);
+      return nextMap;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Grok-illustraties konden niet allemaal worden gemaakt.";
+      setIllustrationStatus(message);
+      setNotice(message);
+      return nextMap;
+    } finally {
+      setIllustrationBusy(false);
     }
   }
 
@@ -1702,7 +1907,185 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${workspaceTab === "bookMaker" ? "book-maker-app" : ""}`}>
+      <div className="workspace-switcher" aria-label="Werkruimte">
+        <button
+          type="button"
+          className={workspaceTab === "reader" ? "" : "quiet"}
+          onClick={() => setWorkspaceTab("reader")}
+        >
+          <BookOpen size={16} />
+          <span>Lezer</span>
+        </button>
+        <button
+          type="button"
+          className={workspaceTab === "bookMaker" ? "" : "quiet"}
+          onClick={() => setWorkspaceTab("bookMaker")}
+        >
+          <BookImage size={16} />
+          <span>Boek maker</span>
+        </button>
+      </div>
+      {workspaceTab === "bookMaker" ? (
+        <section className="book-maker-shell">
+          <header className="book-maker-header">
+            <div>
+              <span className="eyebrow">Talle Wintrip</span>
+              <h2>Boek maker</h2>
+            </div>
+            <div className="book-maker-controls">
+              <label className="field compact-field">
+                <span>AI-bron</span>
+                <select value={aiProvider} onChange={(event) => setAiProvider(event.target.value as AiProvider)}>
+                  <option value="local">Lokale Ollama</option>
+                  <option value="deepseek">DeepSeek API</option>
+                  <option value="grok">Grok API</option>
+                </select>
+              </label>
+              <label className="field compact-field model-field">
+                <span>{aiProviderModelLabel(aiProvider)}</span>
+                <select
+                  value={selectedAiModel}
+                  onChange={(event) => {
+                    if (normalizedAiProvider === "deepseek") {
+                      setSelectedApiModel(event.target.value);
+                    } else if (normalizedAiProvider === "grok") {
+                      setSelectedGrokModel(event.target.value);
+                    } else {
+                      setSelectedLocalModel(event.target.value);
+                    }
+                  }}
+                  disabled={!activeModelOptions.length && !selectedAiModel}
+                >
+                  {activeModelOptions.length ? (
+                    activeModelOptions.map((model) => (
+                      <option value={model.id} key={model.id}>
+                        {model.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">Geen modellen gevonden</option>
+                  )}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="quiet icon-button model-refresh-button"
+                onClick={() => void refreshModelCatalog(true)}
+                disabled={modelCatalogBusy}
+                title="Modellen vernieuwen"
+                aria-label="Modellen vernieuwen"
+              >
+                {modelCatalogBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
+              </button>
+            </div>
+          </header>
+
+          {notice ? <div className="notice">{notice}</div> : null}
+
+          <div className="book-maker-grid">
+            <section className="tool-panel book-maker-interview">
+              <div className="panel-title">
+                <Sparkles size={17} />
+                <span>Interview</span>
+              </div>
+              <figure className="talle-portrait">
+                <img src="/assets/talle-wintrip.jpeg" alt="Talle Wintrip" />
+                <figcaption>Talle Wintrip</figcaption>
+              </figure>
+              <div className="talle-transcript">
+                {bookMakerMessages.map((message, index) => (
+                  <article className={`talle-message ${message.role}`} key={`${message.role}-${index}`}>
+                    <small>{message.role === "talle" ? "Talle" : "John"}</small>
+                    <p>{message.content}</p>
+                  </article>
+                ))}
+              </div>
+              <label className="field">
+                <span>Antwoord</span>
+                <textarea
+                  value={bookMakerInput}
+                  onChange={(event) => setBookMakerInput(event.target.value)}
+                  rows={6}
+                  placeholder="Vertel Talle wat je ziet, wie erbij is, wat er gebeurt..."
+                />
+              </label>
+              <div className="button-row">
+                <button type="button" onClick={() => void sendBookMakerAnswer()} disabled={bookMakerBusy || !bookMakerInput.trim()}>
+                  {bookMakerBusy ? <Loader2 size={16} /> : <Sparkles size={16} />}
+                  <span>{bookMakerBusy ? "Luistert..." : "Stuur naar Talle"}</span>
+                </button>
+                <button
+                  type="button"
+                  className="quiet"
+                  onClick={() => void finishBookMakerSession()}
+                  disabled={bookMakerBusy || storyBusy || !bookMakerMessages.some((message) => message.role === "john")}
+                >
+                  {bookMakerBusy || storyBusy ? <Loader2 size={16} /> : <Wand2 size={16} />}
+                  <span>Afronden</span>
+                </button>
+                <button type="button" className="quiet" onClick={resetBookMakerSession} disabled={bookMakerBusy || storyBusy}>
+                  <Trash2 size={16} />
+                  <span>Nieuw</span>
+                </button>
+              </div>
+              <p className="voice-style-note">{bookMakerStatus}</p>
+            </section>
+
+            <aside className="tool-panel book-maker-brief">
+              <div className="panel-title">
+                <FileText size={17} />
+                <span>Prompt</span>
+              </div>
+              <div className="button-row">
+                <label className="field compact-field">
+                  <span>Hoofdstukken</span>
+                  <select value={6} disabled>
+                    <option value={6}>6</option>
+                  </select>
+                </label>
+                <label className="field compact-field">
+                  <span>Beeldmaker</span>
+                  <select value="grok" disabled>
+                    <option value="grok">Grok Imagine</option>
+                  </select>
+                </label>
+              </div>
+              <label className="field">
+                <span>Grok beeldmodel</span>
+                <select
+                  value={selectedGrokImageModel}
+                  onChange={(event) => setSelectedGrokImageModel(event.target.value)}
+                  disabled={!grokImageModelOptions.length && !selectedGrokImageModel}
+                >
+                  {grokImageModelOptions.length ? (
+                    grokImageModelOptions.map((model) => (
+                      <option value={model.id} key={model.id}>
+                        {model.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">Geen beeldmodellen gevonden</option>
+                  )}
+                </select>
+              </label>
+              <label className="field">
+                <span>Laatste sessieprompt</span>
+                <textarea value={bookMakerPromptPreview || storyPrompt} onChange={(event) => setBookMakerPromptPreview(event.target.value)} rows={14} />
+              </label>
+              <div className="context-brief">
+                <small>AI</small>
+                <p>
+                  {aiProviderLabel(aiProvider)} · {activeModelLabel}
+                </p>
+                <small>Illustraties</small>
+                <p>{apiHealth?.xaiApi?.configured ? "Grok key opgeslagen" : "Grok key ontbreekt"}</p>
+              </div>
+            </aside>
+          </div>
+        </section>
+      ) : (
+      <>
       <aside className="reader-sidebar">
         <div className="brand-block">
           <BookOpen size={28} />
@@ -2618,6 +3001,8 @@ export function App() {
           ))}
         </div>
       </aside>
+      </>
+      )}
     </main>
   );
 }

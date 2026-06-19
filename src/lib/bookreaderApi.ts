@@ -154,6 +154,50 @@ export type StoryGenerateResponse = {
   wordCount: number;
 };
 
+export type BookMakerMessage = {
+  role: "talle" | "john";
+  content: string;
+  createdAt?: string;
+};
+
+export type BookMakerInterviewRequest = {
+  messages: BookMakerMessage[];
+  provider?: AiProvider;
+  model?: string;
+  mode?: "fast" | "deep";
+};
+
+export type BookMakerInterviewResponse = {
+  ok: boolean;
+  provider: string;
+  model: string;
+  mode: "fast" | "deep";
+  reply: string;
+  fallbackUsed?: boolean;
+  warning?: string;
+};
+
+export type BookMakerPromptRequest = {
+  messages: BookMakerMessage[];
+  provider?: AiProvider;
+  model?: string;
+  mode?: "fast" | "deep";
+  language?: string;
+};
+
+export type BookMakerPromptResponse = {
+  ok: boolean;
+  provider: string;
+  model: string;
+  mode: "fast" | "deep";
+  characters: string;
+  plot: string;
+  mainEvent: string;
+  prompt: string;
+  fallbackUsed?: boolean;
+  warning?: string;
+};
+
 export type StoryRechapterRequest = {
   title: string;
   rawText: string;
@@ -559,6 +603,20 @@ export async function analyzeContext(apiBase: string, payload: ContextAnalyzeReq
 
 export async function generateStory(apiBase: string, payload: StoryGenerateRequest): Promise<StoryGenerateResponse> {
   return requestJson<StoryGenerateResponse>(apiBase, "/api/story/generate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function continueBookMakerInterview(apiBase: string, payload: BookMakerInterviewRequest): Promise<BookMakerInterviewResponse> {
+  return requestJson<BookMakerInterviewResponse>(apiBase, "/api/book-maker/interview", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function finalizeBookMakerPrompt(apiBase: string, payload: BookMakerPromptRequest): Promise<BookMakerPromptResponse> {
+  return requestJson<BookMakerPromptResponse>(apiBase, "/api/book-maker/prompt", {
     method: "POST",
     body: JSON.stringify(payload),
   });

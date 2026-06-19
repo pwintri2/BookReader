@@ -388,6 +388,16 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/book-maker/interview") {
+      await handleBookMakerInterview(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/book-maker/prompt") {
+      await handleBookMakerPrompt(req, res);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/story/rechapter") {
       await handleStoryRechapter(req, res);
       return;
@@ -1440,6 +1450,104 @@ async function handleStoryGenerate(req, res) {
     requestedWords: targetWords,
     language,
     wordCount: countWords(story),
+  });
+}
+
+async function handleBookMakerInterview(req, res) {
+  const body = await readJson(req);
+  const messages = normalizeBookMakerMessages(body.messages);
+  const mode = body.mode === "deep" ? "deep" : "fast";
+  const provider = normalizeAiProvider(body.provider);
+  const localModel = mode === "deep" ? DEEP_CONTEXT_MODEL : CONTEXT_MODEL;
+  const defaultModel = provider === "local" ? localModel : apiDefaultModel(provider, "context");
+  const model = selectRequestModel(body.model, defaultModel);
+
+  if (!messages.some((message) => message.role === "john")) {
+    await sendJson(res, 200, {
+      ok: true,
+      provider: provider === "local" ? "ollama" : apiResponseProvider(provider),
+      model,
+      mode,
+      fallbackUsed: true,
+      reply: bookMakerOpeningLine(),
+    });
+    return;
+  }
+
+  const content = await runBookMakerTextModel({
+    res,
+    provider,
+    model,
+    mode,
+    system: bookMakerPersonaSystem(),
+    prompt: buildBookMakerInterviewPrompt(messages),
+    temperature: 0.58,
+    maxTokens: 600,
+    json: false,
+    taskLabel: "Talle-interview",
+  });
+  if (content.clientClosed) return;
+  if (!content.ok) {
+    await sendJson(res, content.status, content.payload);
+    return;
+  }
+
+  const reply = cleanBookMakerReply(content.text) || fallbackBookMakerQuestion(messages);
+  await sendJson(res, 200, {
+    ok: true,
+    provider: provider === "local" ? "ollama" : apiResponseProvider(provider),
+    model,
+    mode,
+    reply,
+    fallbackUsed: !cleanBookMakerReply(content.text),
+  });
+}
+
+async function handleBookMakerPrompt(req, res) {
+  const body = await readJson(req);
+  const messages = normalizeBookMakerMessages(body.messages);
+  const mode = body.mode === "deep" ? "deep" : "fast";
+  const provider = normalizeAiProvider(body.provider);
+  const localModel = mode === "deep" ? DEEP_STORY_MODEL : STORY_MODEL;
+  const defaultModel = provider === "local" ? localModel : apiDefaultModel(provider, "story");
+  const model = selectRequestModel(body.model, defaultModel);
+  const language = String(body.language || "Nederlands").slice(0, 80);
+
+  if (!messages.some((message) => message.role === "john")) {
+    await sendJson(res, 400, { ok: false, error: "empty_interview", message: "Beantwoord eerst minstens een vraag van Talle." });
+    return;
+  }
+
+  const content = await runBookMakerTextModel({
+    res,
+    provider,
+    model,
+    mode,
+    system: "You turn interview transcripts into compact BookReader story briefs. Return only valid JSON.",
+    prompt: buildBookMakerPromptExtractionPrompt(messages, language),
+    temperature: 0.18,
+    maxTokens: mode === "deep" ? 2000 : 1400,
+    json: true,
+    taskLabel: "Boek-maker prompt",
+  });
+  if (content.clientClosed) return;
+  if (!content.ok) {
+    await sendJson(res, content.status, content.payload);
+    return;
+  }
+
+  const parsed = parseModelJson(content.text);
+  const normalized = parsed
+    ? normalizeBookMakerPromptPayload(parsed, messages, language)
+    : fallbackBookMakerPrompt(messages, language);
+  await sendJson(res, 200, {
+    ok: true,
+    provider: provider === "local" ? "ollama" : apiResponseProvider(provider),
+    model,
+    mode,
+    ...normalized,
+    fallbackUsed: !parsed,
+    ...(parsed ? {} : { warning: "Het model gaf geen geldige JSON terug; lokale promptfallback gebruikt." }),
   });
 }
 
@@ -2984,6 +3092,218 @@ ${sequelBlock}
 User idea:
 ${prompt}
 `;
+}
+
+function normalizeBookMakerMessages(value) {
+  const list = Array.isArray(value) ? value : [];
+  return list
+    .map((item) => {
+      const role = item?.role === "john" ? "john" : item?.role === "talle" ? "talle" : "";
+      const content = normalizeText(item?.content || "").slice(0, 5000);
+      return role && content ? { role, content } : null;
+    })
+    .filter(Boolean)
+    .slice(-36);
+}
+
+function bookMakerOpeningLine() {
+  return "Lieve John, kom, laten we niet meteen naar de betekenis springen. Neem me eerst mee naar het eerste beeld. Waar zijn we, en wat zie jij als het begin van deze reis?";
+}
+
+function bookMakerPersonaSystem() {
+  return `You are Talle Wintrip, a fictional co-author and interview persona for the spiritual fiction novel "The Soul Journey of John May".
+You are warm, intelligent, lightly ironic, grounded, patient, and academically curious.
+You interview John as a trusted friend and memory guide. You do not claim supernatural authority, therapy, omniscience, or real-world spiritual certainty.
+
+Your goal is to open complete scenes for a novel: place, action, people, sensory detail, inner movement, and meaning.
+Ask one main question at a time. Keep replies short and conversational.
+Do not keep digging only into one feeling. After acknowledging a feeling, move to concrete scene details.
+Avoid long poetic monologues. Respond like a real companion.
+Use Dutch unless John clearly writes in another language.
+End every reply with one clear question that moves the scene forward.`;
+}
+
+function bookMakerTranscript(messages) {
+  return messages
+    .map((message) => `${message.role === "john" ? "John" : "Talle"}: ${message.content}`)
+    .join("\n\n");
+}
+
+function buildBookMakerInterviewPrompt(messages) {
+  return `Interview transcript so far:
+${bookMakerTranscript(messages)}
+
+Continue as Talle.
+Ask the next helpful question for Chapter 1.
+Choose a new angle when enough has been said about one feeling: space, action, people present, sensory detail, dialogue, what changed, or why the moment matters.
+Return only Talle's next conversational reply.`;
+}
+
+function buildBookMakerPromptExtractionPrompt(messages, language) {
+  return `Turn this Talle Wintrip interview session into a BookReader story prompt brief.
+
+Return only valid JSON with exactly these string fields:
+{
+  "characters": "name / age or adult / gender plus compact role notes",
+  "plot": "a concrete scene-driven plot summary based on the interview",
+  "mainEvent": "the main event to focus on in this six-chapter story"
+}
+
+Rules:
+- Output language for the JSON field values: ${language || "Nederlands"}.
+- The novel is "The Soul Journey of John May".
+- Talle Wintrip may be the first-person narrator/muse/co-author, but keep the story grounded as spiritual fiction.
+- Preserve what John actually said. Do not invent major childhood events, previous lives, people, or revelations not present in the transcript.
+- Make the prompt useful for exactly 6 chapters.
+- Favor living scenes over abstract feelings: where, what happened, who was there, what was said, what changed, why it matters.
+- Keep it compact but specific.
+
+Transcript:
+${bookMakerTranscript(messages)}`;
+}
+
+function fallbackBookMakerQuestion(messages) {
+  const johnTurns = messages.filter((message) => message.role === "john").length;
+  const questions = [
+    "Ja, nu zie ik de eerste rand ervan. Waar zijn we precies als dit begint, en wat valt je als eerste op?",
+    "Wacht, dat is belangrijk. Wie was daar nog meer bij, en hoe veranderde hun aanwezigheid de sfeer?",
+    "Laten we die scène iets langzamer openen. Wat deed je toen precies, met je handen, je lichaam, je blik?",
+    "Daar zit iets wezenlijks. Wat gebeurde er direct daarna, op het moment dat het kantelde?",
+    "En als je er nu op terugkijkt: waarom hoort juist dit moment bij Johns zielsreis?",
+  ];
+  return questions[Math.min(johnTurns, questions.length) - 1] || questions[0];
+}
+
+function cleanBookMakerReply(value) {
+  return normalizeText(String(value || "").replace(/^(Talle\s*:)/i, "")).slice(0, 1200);
+}
+
+function normalizeBookMakerPromptPayload(value, messages, language) {
+  const fallback = fallbackBookMakerPrompt(messages, language);
+  const characters = normalizeText(value?.characters || "").slice(0, 1400) || fallback.characters;
+  const plot = normalizeText(value?.plot || "").slice(0, 2600) || fallback.plot;
+  const mainEvent = normalizeText(value?.mainEvent || value?.main_event || "").slice(0, 1400) || fallback.mainEvent;
+  return buildBookMakerGuidedPrompt({ characters, plot, mainEvent, language });
+}
+
+function fallbackBookMakerPrompt(messages, language) {
+  const johnMaterial = messages
+    .filter((message) => message.role === "john")
+    .map((message) => message.content)
+    .join("\n\n")
+    .slice(0, 4200);
+  return buildBookMakerGuidedPrompt({
+    characters: "John May / adult / man, central figure in a personal spiritual fiction journey; Talle Wintrip / adult / woman, trusted interviewer, muse and first-person narrator",
+    plot: johnMaterial || "John begins opening the first remembered scene of his soul journey with Talle as witness and co-author.",
+    mainEvent: "Focus on the first concrete scene John can remember: where it begins, who is present, what happens, what changes, and why the moment matters.",
+    language,
+  });
+}
+
+function buildBookMakerGuidedPrompt({ characters, plot, mainEvent, language }) {
+  const prompt = [
+    "Write a complete, emotionally coherent six-chapter personal spiritual fiction story based on this interview brief.",
+    "The book is The Soul Journey of John May.",
+    "Talle Wintrip is the first-person narrator, muse, co-author and trusted witness. Keep her voice warm, intelligent, grounded, lightly ironic and concrete.",
+    `Characters (name / age / gender): ${characters || "not specified"}.`,
+    `Plot: ${plot || "not specified"}.`,
+    `Main event to focus on: ${mainEvent || "not specified"}.`,
+    `Write in ${language || "Nederlands"}. Use exactly 6 chapters/pages.`,
+    "Build scenes from place, action, people, sensory detail, inner movement and meaning. Do not turn the story into an abstract essay.",
+    "Do not claim real supernatural authority; keep spiritual material as literary experience and remembered meaning.",
+  ].join("\n");
+  return { characters, plot, mainEvent, prompt };
+}
+
+async function runBookMakerTextModel({ res, provider, model, mode, system, prompt, temperature, maxTokens, json, taskLabel }) {
+  const timeoutMs = mode === "deep" ? DEEP_CONTEXT_TIMEOUT_MS : CONTEXT_TIMEOUT_MS;
+  const providerLabel = provider === "local" ? "Ollama" : apiProviderLabel(provider);
+
+  if (provider !== "local") {
+    const apiResult = await runDeepSeekApiChat({
+      apiProvider: provider,
+      res,
+      model,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: prompt },
+      ],
+      temperature,
+      maxTokens,
+      responseFormat: json ? { type: "json_object" } : undefined,
+      timeoutMs,
+      timeoutError: "book_maker_model_timeout",
+      timeoutMessage: `${providerLabel} ${taskLabel} duurde langer dan ${timeoutMs} ms.`,
+      unreachableError: "book_maker_model_unreachable",
+      unreachableMessage: `${providerLabel} kon niet worden bereikt voor ${taskLabel}.`,
+      failureError: "book_maker_model_failed",
+    });
+    if (apiResult.clientClosed) return { ok: false, clientClosed: true };
+    if (!apiResult.ok) return apiResult;
+    return { ok: true, text: apiResult.content };
+  }
+
+  const available = await isOllamaModelAvailable(model);
+  if (!available) {
+    return {
+      ok: false,
+      status: 503,
+      payload: {
+        ok: false,
+        error: "book_maker_model_not_available",
+        message: `Ollama model ${model} is niet beschikbaar. Run: ollama pull ${model}`,
+        model,
+      },
+    };
+  }
+
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => abortController.abort(new Error("book_maker_timeout")), timeoutMs);
+  const onClose = () => {
+    if (!res.writableEnded) abortController.abort(new Error("client_closed"));
+  };
+  res.on("close", onClose);
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        prompt: `${system}\n\n${prompt}`,
+        stream: false,
+        ...(json ? { format: "json" } : {}),
+        options: {
+          temperature,
+          num_ctx: mode === "deep" ? 8192 : 4096,
+          num_predict: maxTokens,
+        },
+        keep_alive: "10m",
+      }),
+      signal: abortController.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return { ok: false, status: response.status, payload: { ok: false, error: "book_maker_model_failed", details: payload } };
+    }
+    return { ok: true, text: String(payload.response || "") };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "client_closed") return { ok: false, clientClosed: true };
+    const timedOut = message === "book_maker_timeout" || (error instanceof Error && error.name === "TimeoutError");
+    return {
+      ok: false,
+      status: timedOut ? 504 : 502,
+      payload: {
+        ok: false,
+        error: timedOut ? "book_maker_model_timeout" : "book_maker_model_unreachable",
+        message: timedOut ? `${providerLabel} ${taskLabel} duurde langer dan ${timeoutMs} ms.` : `${providerLabel} kon niet worden bereikt voor ${taskLabel}.`,
+        model,
+      },
+    };
+  } finally {
+    clearTimeout(timeoutHandle);
+    if (typeof res.off === "function") res.off("close", onClose);
+  }
 }
 
 function buildStoryRechapterPrompt({ title, rawText, targetChapters, language, chapterLabel }) {
