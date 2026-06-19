@@ -60,6 +60,8 @@ Belangrijke routes:
 ```text
 POST /api/story/generate
 POST /api/story/rechapter
+POST /api/book-maker/interview
+POST /api/book-maker/prompt
 POST /api/context/analyze
 POST /api/film/plan
 ```
@@ -79,6 +81,32 @@ De frontend bewaart de gebruikersprompt als `storyPrompt`. De server voegt daar 
 - geen analyse, JSON, code fences of verborgen redenering in de output.
 
 Na generatie valideert de API onder meer paginamarkers, woordenaantal, volledig einde, herhaling, pseudo-taal en ongepaste beschrijvingen.
+
+## Boek-Maker En Talle
+
+De Boek-maker gebruikt twee extra routes:
+
+```text
+POST /api/book-maker/interview
+POST /api/book-maker/prompt
+```
+
+`/api/book-maker/interview` accepteert een lijst interviewberichten met rollen `talle` en `john`. De route gebruikt dezelfde providerselectie als de rest van de API: lokale Ollama, DeepSeek API of Grok API. Als er nog geen antwoord van John is, geeft de route de vaste openingsvraag van Talle terug zonder modelcall.
+
+`/api/book-maker/prompt` zet de interviewsessie om naar de bestaande BookReader-promptstructuur:
+
+```json
+{
+  "characters": "...",
+  "plot": "...",
+  "mainEvent": "...",
+  "prompt": "..."
+}
+```
+
+De prompt is bedoeld voor een verhaal van precies 6 hoofdstukken. Als het model geen geldige JSON teruggeeft, bouwt de server een lokale fallbackprompt uit Johns antwoorden.
+
+De frontend gebruikt daarna `/api/story/generate` voor het verhaal en `/api/illustrations/generate` met provider `grok` voor de automatische hoofdstukillustraties.
 
 ## Vervolg En Referenties
 

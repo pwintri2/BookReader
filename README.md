@@ -1,6 +1,6 @@
 # BookReader
 
-BookReader is een local-first leesdesk, verhalenmachine en kleine illustratiestudio. De app leest lange teksten en projectbestanden, verdeelt ze in hoofdstukken, leest ze voor, maakt nieuwe verhalen, bewaart een SQL-bibliotheek en kan beelden, covers, portretten en filmplannen maken via lokale of API-modellen.
+BookReader is een local-first leesdesk, verhalenmachine, Boek-maker en kleine illustratiestudio. De app leest lange teksten en projectbestanden, verdeelt ze in hoofdstukken, leest ze voor, maakt nieuwe verhalen, interviewt materiaal tot boekprompts, bewaart een SQL-bibliotheek en kan beelden, covers, portretten en filmplannen maken via lokale of API-modellen.
 
 De huidige architectuur bestaat uit:
 
@@ -17,6 +17,8 @@ De huidige architectuur bestaat uit:
 - Verdeelt documenten tot 500.000 woorden in hoofdstukken.
 - Kan bestaande tekst lokaal verdelen of met AI opnieuw in nette hoofdstukken zetten.
 - Leest hoofdstukken voor met browserstemmen of server-side Piper.
+- Heeft een aparte `Boek maker`-tab rechtsboven met Talle Wintrip als interviewpersona.
+- Zet een Talle-interviewsessie om naar de bestaande story-promptstructuur en maakt daar een verhaal van 6 hoofdstukken van.
 - Maakt verhalen vanuit een begeleide promptbuilder of een handmatig aangepaste prompt.
 - Ondersteunt lokale Ollama, DeepSeek API en Grok API voor verhalen, contextanalyse, hoofdstukken en filmplannen.
 - Maakt vervolgen op een gekozen SQL-verhaal of op het huidige verhaal.
@@ -25,6 +27,7 @@ De huidige architectuur bestaat uit:
 - Importeert oudere `.bookreader.json` projecten naar SQL.
 - Downloadt nog steeds complete `.bookreader.json` projectbestanden als draagbare backup.
 - Maakt hoofdstukillustraties, boekcovers en karakterportretten met ComfyUI of Grok Imagine.
+- Kan bij de Boek-maker automatisch per hoofdstuk Grok Imagine-illustraties aanvragen.
 - Maakt filmplannen met scènes, continuïteitsbijbel, videoprompts en audioprompts.
 - Slaat tekst, promptmetadata, contextanalyse, filmplan en beeldmetadata op in projecten.
 
@@ -176,6 +179,41 @@ Bij `Maak verhaal` stuurt de app deze prompt naar `/api/story/generate`. De serv
 - verbod op analyse, JSON, code fences, modelnotities en verborgen redenering.
 
 Na generatie controleert de server de output op onder meer ontbrekende paginamarkers, te weinig woorden, onaf einde, onleesbaar pseudo-Nederlands, te veel herhaling, cijferbrij, ongepaste lichaamsbeschrijving bij jonge personages en te veel formulezinnen.
+
+## Boek Maker Met Talle
+
+De knop rechtsboven wisselt tussen `Lezer` en `Boek maker`. De Boek-maker is bedoeld om een sessie met Talle Wintrip als fictieve co-auteur en interviewpersona om te zetten naar boekmateriaal.
+
+In deze tab:
+
+- Talle Wintrip staat onder `Interview` met het lokale portretasset `public/assets/talle-wintrip.jpeg`;
+- Talle opent het gesprek voor Hoofdstuk 1 en vraagt door op concrete scènes;
+- de gebruiker antwoordt als John;
+- `Stuur naar Talle` vraagt het gekozen tekstmodel om een volgende interviewvraag;
+- `Afronden` zet het interview om naar `characters`, `plot`, `mainEvent` en een finale `prompt`;
+- de prompt wordt opgeslagen in dezelfde `storyPrompt` structuur als de gewone promptbuilder;
+- de app maakt daarna automatisch een verhaal met precies 6 hoofdstukken;
+- de app zet de beeldmaker voor deze workflow op Grok en vraagt per hoofdstuk een Grok Imagine-illustratie aan;
+- het eindproject wordt lokaal en, wanneer mogelijk, in SQLite opgeslagen.
+
+De Boek-maker gebruikt dezelfde tekstmodelkeuze als de rest van de app:
+
+- `Lokale Ollama`;
+- `DeepSeek API`;
+- `Grok API`.
+
+Backendroutes:
+
+```text
+POST /api/book-maker/interview
+POST /api/book-maker/prompt
+```
+
+`/api/book-maker/interview` gebruikt Talle's persona-instructie om een korte, gerichte vervolgvraag te maken. De persona is warm, concreet, geduldig en licht ironisch, maar blijft gegrond: ze claimt geen echte spirituele autoriteit of alwetendheid.
+
+`/api/book-maker/prompt` vraagt het gekozen model om geldige JSON met `characters`, `plot` en `mainEvent`. Als het model geen geldige JSON teruggeeft, gebruikt de server een lokale fallbackprompt op basis van Johns antwoorden.
+
+Voor automatische hoofdstukillustraties is een opgeslagen Grok/xAI key nodig. Zonder Grok key kan het verhaal nog worden gemaakt, maar de beeldstap zal een duidelijke foutmelding geven.
 
 ## Vervolg Maken
 
@@ -331,6 +369,8 @@ POST   /api/library/categories
 POST   /api/library/categories/assign
 POST   /api/story/generate
 POST   /api/story/rechapter
+POST   /api/book-maker/interview
+POST   /api/book-maker/prompt
 POST   /api/context/analyze
 POST   /api/film/plan
 POST   /api/illustrations/generate
