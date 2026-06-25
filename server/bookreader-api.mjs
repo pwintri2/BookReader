@@ -57,6 +57,16 @@ const XAI_API_IMAGE_MODEL_OPTIONS = [
   { id: "grok-imagine-image-quality", label: "Grok Imagine Image Quality" },
   { id: "grok-imagine-image", label: "Grok Imagine Image" },
 ];
+let MODELSLAB_API_KEY = process.env.BOOKREADER_MODELSLAB_API_KEY || process.env.MODELSLAB_API_KEY || "";
+const MODELSLAB_API_BASE_URL = normalizeBaseUrl(process.env.BOOKREADER_MODELSLAB_API_BASE_URL || "https://modelslab.com");
+const MODELSLAB_IMAGE_ENDPOINT = process.env.BOOKREADER_MODELSLAB_IMAGE_ENDPOINT || "/api/v6/realtime/text2img";
+const MODELSLAB_IMAGE_MODEL = process.env.BOOKREADER_MODELSLAB_IMAGE_MODEL || "realtime";
+const MODELSLAB_IMAGE_PROMPT_MAX_CHARS = Number(process.env.BOOKREADER_MODELSLAB_IMAGE_PROMPT_MAX_CHARS || 1400);
+const MODELSLAB_POLL_TIMEOUT_MS = Number(process.env.BOOKREADER_MODELSLAB_POLL_TIMEOUT_MS || 120000);
+const MODELSLAB_POLL_INTERVAL_MS = Number(process.env.BOOKREADER_MODELSLAB_POLL_INTERVAL_MS || 3000);
+const MODELSLAB_IMAGE_MODEL_OPTIONS = [
+  { id: "realtime", label: "ModelsLab Realtime SD" },
+];
 const MAX_CONTEXT_CHARS = Number(process.env.BOOKREADER_CONTEXT_MAX_CHARS || 18000);
 const REFERENCE_MAX_CHARS = Number(process.env.BOOKREADER_REFERENCE_MAX_CHARS || 60000);
 const CONTEXT_TIMEOUT_MS = Number(process.env.BOOKREADER_CONTEXT_TIMEOUT_MS || 35000);
@@ -297,6 +307,9 @@ mkdirSync(IMAGES_DIR, { recursive: true });
 mkdirSync(PROJECTS_DIR, { recursive: true });
 mkdirSync(VOICES_DIR, { recursive: true });
 
+const EXTERNAL_COMMAND_QUEUE = [];
+const EXTERNAL_COMMAND_QUEUE_LIMIT = 20;
+
 const server = createServer(async (req, res) => {
   setCors(res);
   if (req.method === "OPTIONS") {
@@ -315,6 +328,16 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/api/models") {
       await sendJson(res, 200, await modelCatalogPayload());
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/external/story-command") {
+      await handleExternalStoryCommand(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/external/story-command/next") {
+      await handleExternalStoryCommandNext(res);
       return;
     }
 
@@ -418,6 +441,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/settings/modelslab-key") {
+      await handleModelsLabKeySave(req, res);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/media/cache-image") {
       await handleCacheImage(req, res);
       return;
@@ -513,6 +541,12 @@ function healthPayload() {
       filmModel: XAI_API_FILM_MODEL,
       imageModel: XAI_API_IMAGE_MODEL,
     },
+    modelslabApi: {
+      configured: Boolean(MODELSLAB_API_KEY),
+      baseUrl: MODELSLAB_API_BASE_URL,
+      endpoint: MODELSLAB_IMAGE_ENDPOINT,
+      imageModel: MODELSLAB_IMAGE_MODEL,
+    },
     storage: {
       outputDir: OUTPUT_DIR,
       sqliteDb: SQLITE_DB,
@@ -523,12 +557,67 @@ function healthPayload() {
   };
 }
 
+async function handleExternalStoryCommand(req, res) {
+  const body = await readJson(req);
+  const command = normalizeExternalStoryCommand(body);
+  EXTERNAL_COMMAND_QUEUE.push(command);
+  while (EXTERNAL_COMMAND_QUEUE.length > EXTERNAL_COMMAND_QUEUE_LIMIT) {
+    EXTERNAL_COMMAND_QUEUE.shift();
+  }
+  await sendJson(res, 200, {
+    ok: true,
+    queued: EXTERNAL_COMMAND_QUEUE.length,
+    command,
+  });
+}
+
+async function handleExternalStoryCommandNext(res) {
+  await sendJson(res, 200, {
+    ok: true,
+    command: EXTERNAL_COMMAND_QUEUE.shift() || null,
+  });
+}
+
+function normalizeExternalStoryCommand(body) {
+  const type = String(body.type || "story-from-alice");
+  if (type !== "story-from-alice") {
+    throw new Error(`Onbekend extern commandtype: ${type}`);
+  }
+
+  const characters = normalizeText(body.characters || "").slice(0, 3000);
+  const plot = normalizeText(body.plot || "").slice(0, 6000);
+  const mainEvent = normalizeText(body.mainEvent || "").slice(0, 3000);
+  if (!characters || !plot || !mainEvent) {
+    throw new Error("Alice-command mist characters, plot of mainEvent.");
+  }
+
+  return {
+    id: randomUUID(),
+    type,
+    source: String(body.source || "alice").slice(0, 80),
+    createdAt: new Date().toISOString(),
+    characters,
+    plot,
+    mainEvent,
+    pages: clampNumber(Number(body.pages || 6), 2, 24),
+    wordsPerPage: clampNumber(Number(body.wordsPerPage || 550), 180, 1000),
+    genre: String(body.genre || "verhalende fictie").slice(0, 160),
+    tone: String(body.tone || "beeldend, warm en spannend").slice(0, 180),
+    language: String(body.language || "Auto").slice(0, 80),
+    mode: body.mode === "fast" ? "fast" : "deep",
+    provider: normalizeAiProvider(body.provider || "deepseek"),
+    model: String(body.model || "").slice(0, 160),
+    autoGenerate: body.autoGenerate !== false,
+  };
+}
+
 async function modelCatalogPayload() {
-  const [ollama, deepseekApi, xaiApi, xaiImageApi] = await Promise.all([
+  const [ollama, deepseekApi, xaiApi, xaiImageApi, modelslabImageApi] = await Promise.all([
     ollamaModelCatalog(),
     deepSeekApiModelCatalog(),
     xaiApiModelCatalog(),
     xaiImageApiModelCatalog(),
+    modelsLabImageApiModelCatalog(),
   ]);
   return {
     ok: true,
@@ -536,6 +625,7 @@ async function modelCatalogPayload() {
     deepseekApi,
     xaiApi,
     xaiImageApi,
+    modelslabImageApi,
     defaults: {
       local: {
         fastContext: CONTEXT_MODEL,
@@ -553,6 +643,9 @@ async function modelCatalogPayload() {
         story: XAI_API_STORY_MODEL,
         film: XAI_API_FILM_MODEL,
         image: XAI_API_IMAGE_MODEL,
+      },
+      modelslab: {
+        image: MODELSLAB_IMAGE_MODEL,
       },
     },
   };
@@ -741,6 +834,20 @@ async function xaiImageApiModelCatalog() {
       error: error instanceof Error && error.message ? error.message : "xai_image_models_unreachable",
     };
   }
+}
+
+async function modelsLabImageApiModelCatalog() {
+  const extraModels = String(process.env.BOOKREADER_MODELSLAB_IMAGE_MODELS || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .map((id) => ({ id, label: id }));
+  const models = mergeModelOptions(normalizeModelOptions(MODELSLAB_IMAGE_MODEL_OPTIONS), extraModels);
+  return {
+    configured: Boolean(MODELSLAB_API_KEY),
+    baseUrl: MODELSLAB_API_BASE_URL,
+    models,
+  };
 }
 
 function mergeModelOptions(primary, secondary) {
@@ -1304,7 +1411,8 @@ async function handleStoryGenerate(req, res) {
         },
         { role: "user", content: generationPrompt },
       ],
-      temperature: mode === "deep" ? 0.72 : 0.68,
+      temperature: mode === "deep" ? 0.85 : 0.8,
+      topP: 0.95,
       maxTokens: Math.min(64000, Math.max(mode === "deep" ? 2800 : 1400, Math.round(targetWords * 2.25))),
       timeoutMs,
       timeoutError: "story_model_timeout",
@@ -1354,6 +1462,7 @@ async function handleStoryGenerate(req, res) {
       requestedWords: targetWords,
       language,
       wordCount: countWords(story),
+      warnings: quality.warnings,
     });
     return;
   }
@@ -1384,8 +1493,8 @@ async function handleStoryGenerate(req, res) {
         prompt: generationPrompt,
         stream: false,
         options: {
-          temperature: mode === "deep" ? 0.72 : 0.68,
-          top_p: 0.92,
+          temperature: mode === "deep" ? 0.85 : 0.8,
+          top_p: 0.95,
           num_ctx: mode === "deep" ? 8192 : 4096,
           num_predict: Math.min(mode === "deep" ? 12000 : 6000, Math.max(mode === "deep" ? 2200 : 1200, Math.round(targetWords * 2.2))),
         },
@@ -1450,6 +1559,7 @@ async function handleStoryGenerate(req, res) {
     requestedWords: targetWords,
     language,
     wordCount: countWords(story),
+    warnings: quality.warnings,
   });
 }
 
@@ -1944,6 +2054,35 @@ async function handleXaiKeySave(req, res) {
   });
 }
 
+async function handleModelsLabKeySave(req, res) {
+  const body = await readJson(req);
+  const clear = body.clear === true;
+  const apiKey = String(body.apiKey || "").trim();
+
+  if (clear || !apiKey) {
+    writeProjectEnvValue("BOOKREADER_MODELSLAB_API_KEY", "");
+    delete process.env.BOOKREADER_MODELSLAB_API_KEY;
+    delete process.env.MODELSLAB_API_KEY;
+    MODELSLAB_API_KEY = "";
+    await sendJson(res, 200, { ok: true, configured: false, message: "ModelsLab API key is gewist." });
+    return;
+  }
+
+  if (!/^[A-Za-z0-9._-]{12,}$/.test(apiKey) || apiKey.length > 500) {
+    await sendJson(res, 400, {
+      ok: false,
+      error: "invalid_modelslab_api_key",
+      message: "Controleer de ModelsLab API key en probeer opnieuw.",
+    });
+    return;
+  }
+
+  writeProjectEnvValue("BOOKREADER_MODELSLAB_API_KEY", apiKey);
+  process.env.BOOKREADER_MODELSLAB_API_KEY = apiKey;
+  MODELSLAB_API_KEY = apiKey;
+  await sendJson(res, 200, { ok: true, configured: true, message: "ModelsLab API key is opgeslagen." });
+}
+
 async function handleCacheImage(req, res) {
   const body = await readJson(req);
   const sourceUrl = String(body.imageUrl || "").trim();
@@ -2104,6 +2243,20 @@ async function handleIllustrationGenerate(req, res) {
     return;
   }
 
+  if (provider === "modelslab") {
+    await handleModelsLabImageGenerate({
+      res,
+      prompt,
+      negativePrompt,
+      seed,
+      kind,
+      label,
+      model: selectRequestModel(body.model, MODELSLAB_IMAGE_MODEL),
+      aspectRatio: selectImageAspectRatio(body.aspectRatio, kind),
+    });
+    return;
+  }
+
   if (!COMFY_WORKFLOW || !existsSync(COMFY_WORKFLOW)) {
     await sendJson(res, 503, {
       ok: false,
@@ -2141,7 +2294,9 @@ async function handleIllustrationGenerate(req, res) {
 
 function normalizeImageProvider(value) {
   const provider = String(value || "").trim().toLowerCase();
-  return provider === "grok" || provider === "xai" || provider === "xai-image" ? "grok" : "comfy";
+  if (provider === "grok" || provider === "xai" || provider === "xai-image") return "grok";
+  if (provider === "modelslab" || provider === "modelslab-image" || provider === "stablediffusionapi") return "modelslab";
+  return "comfy";
 }
 
 function selectImageAspectRatio(value, kind) {
@@ -2254,6 +2409,210 @@ function buildXaiImagePrompt({ prompt, negativePrompt, kind }) {
     antiOldMaster,
     avoid,
   ].filter(Boolean).join(" "), XAI_IMAGE_PROMPT_MAX_CHARS);
+}
+
+async function handleModelsLabImageGenerate({ res, prompt, negativePrompt, seed, kind, label, model, aspectRatio }) {
+  if (!MODELSLAB_API_KEY) {
+    await sendJson(res, 503, {
+      ok: false,
+      error: "modelslab_api_key_missing",
+      message: "ModelsLab beeldgeneratie is gekozen, maar BOOKREADER_MODELSLAB_API_KEY staat niet op de server.",
+      model,
+    });
+    return;
+  }
+
+  const imagePrompt = buildModelsLabImagePrompt({ prompt, kind });
+  const negative = buildModelsLabNegativePrompt(negativePrompt);
+  const { width, height } = modelsLabDimensions(aspectRatio, kind);
+  const requestBody = {
+    key: MODELSLAB_API_KEY,
+    prompt: imagePrompt,
+    negative_prompt: negative,
+    width: String(width),
+    height: String(height),
+    samples: 1,
+    safety_checker: false,
+    base64: false,
+    seed: Number.isFinite(seed) ? seed : null,
+    webhook: null,
+    track_id: null,
+  };
+  // The realtime endpoint ignores model_id; community endpoints honour it.
+  if (model && model !== "realtime") requestBody.model_id = model;
+
+  let response;
+  try {
+    response = await fetch(apiUrl(MODELSLAB_API_BASE_URL, MODELSLAB_IMAGE_ENDPOINT), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
+  } catch (error) {
+    await sendJson(res, 502, {
+      ok: false,
+      error: "modelslab_image_unreachable",
+      message: error instanceof Error ? error.message : "ModelsLab beeldgeneratie kon niet worden bereikt.",
+      model,
+    });
+    return;
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    await sendJson(res, response.status, {
+      ok: false,
+      error: "modelslab_image_failed",
+      message: "ModelsLab beeldgeneratie gaf een fout terug.",
+      model,
+      details: sanitizeModelsLabError(payload),
+    });
+    return;
+  }
+
+  let imageUrl;
+  try {
+    imageUrl = await resolveModelsLabImageUrl(payload);
+  } catch (error) {
+    await sendJson(res, 502, {
+      ok: false,
+      error: "modelslab_image_failed",
+      message: error instanceof Error ? error.message : "ModelsLab gaf geen bruikbare afbeelding terug.",
+      model,
+      details: sanitizeModelsLabError(payload),
+    });
+    return;
+  }
+
+  try {
+    const stored = await storeGeneratedImage({
+      url: imageUrl,
+      b64Json: "",
+      contentType: "image/png",
+      kind,
+      label,
+    });
+    await sendJson(res, 200, {
+      ok: true,
+      provider: "modelslab-image",
+      model,
+      prompt: imagePrompt,
+      status: "complete",
+      complete: true,
+      imageUrl: stored.imageUrl,
+      filePath: stored.filePath,
+      bytes: stored.bytes,
+      contentType: stored.contentType,
+      seed: Number.isFinite(seed) ? seed : undefined,
+    });
+  } catch (error) {
+    await sendJson(res, 502, {
+      ok: false,
+      error: "modelslab_image_cache_failed",
+      message: error instanceof Error ? error.message : "ModelsLab-afbeelding kon niet lokaal worden opgeslagen.",
+      model,
+    });
+  }
+}
+
+// ModelsLab queues slow jobs and returns status "processing" with a fetch_result
+// URL; poll it (POST {key}) until an output URL appears or the timeout is reached.
+async function resolveModelsLabImageUrl(initialPayload) {
+  let payload = initialPayload;
+  const deadline = Date.now() + MODELSLAB_POLL_TIMEOUT_MS;
+  while (true) {
+    const status = String(payload?.status || "").toLowerCase();
+    const direct = firstModelsLabOutput(payload);
+    if (direct) return direct;
+    if (status === "error" || status === "failed") {
+      throw new Error(modelsLabMessage(payload) || "ModelsLab meldde een fout.");
+    }
+    if (status !== "processing") {
+      throw new Error(modelsLabMessage(payload) || "ModelsLab gaf geen afbeelding terug.");
+    }
+    const fetchUrl = String(payload?.fetch_result || "").trim();
+    if (!fetchUrl || Date.now() >= deadline) {
+      const future = firstModelsLabOutput({ output: payload?.future_links });
+      if (future) return future;
+      throw new Error("ModelsLab-render duurde te lang (timeout).");
+    }
+    await delay(MODELSLAB_POLL_INTERVAL_MS);
+    const fetchResponse = await fetch(fetchUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: MODELSLAB_API_KEY }),
+    });
+    payload = await fetchResponse.json().catch(() => ({}));
+    if (!fetchResponse.ok) {
+      throw new Error(modelsLabMessage(payload) || `ModelsLab fetch faalde: HTTP ${fetchResponse.status}`);
+    }
+  }
+}
+
+function firstModelsLabOutput(payload) {
+  const output = payload?.output;
+  if (Array.isArray(output)) {
+    const url = output.find((item) => typeof item === "string" && item.trim());
+    return url ? url.trim() : "";
+  }
+  if (typeof output === "string" && output.trim()) return output.trim();
+  return "";
+}
+
+function modelsLabMessage(payload) {
+  return String(payload?.message || payload?.messege || payload?.tip || "").slice(0, 600);
+}
+
+function sanitizeModelsLabError(payload) {
+  return {
+    status: String(payload?.status || "").slice(0, 60),
+    message: modelsLabMessage(payload),
+  };
+}
+
+function buildModelsLabImagePrompt({ prompt, kind }) {
+  const subject =
+    kind === "cover"
+      ? "Book cover illustration grounded in the actual story."
+      : kind === "portrait"
+        ? "Single character portrait grounded in the actual story description."
+        : "Chapter illustration grounded in one literal scene from the actual story.";
+  return truncate([
+    subject,
+    "STRICT STORY LOCK: preserve only the characters, setting, objects, mood, and action described by the prompt.",
+    prompt,
+    "Clean contemporary narrative illustration, stable anatomy, consistent face, natural hands, clear eyes, readable pose.",
+  ].filter(Boolean).join(" "), MODELSLAB_IMAGE_PROMPT_MAX_CHARS);
+}
+
+function buildModelsLabNegativePrompt(negativePrompt) {
+  const base = [
+    "Dutch Golden Age painting", "Jan Steen", "Rembrandt", "old master oil painting", "tavern scene",
+    "caricature", "Anton Pieck", "nostalgic Dutch village painting", "antique postcard",
+    "extra people", "unrelated scenery", "text", "watermark", "logo", "melted features", "distorted face",
+    "low quality", "blurry",
+  ];
+  const extra = String(negativePrompt || "").trim();
+  return truncate([extra, base.join(", ")].filter(Boolean).join(", "), MODELSLAB_IMAGE_PROMPT_MAX_CHARS);
+}
+
+function modelsLabDimensions(aspectRatio, kind) {
+  const ratioMap = {
+    "1:1": [1, 1], "16:9": [16, 9], "9:16": [9, 16], "4:3": [4, 3], "3:4": [3, 4],
+    "3:2": [3, 2], "2:3": [2, 3], "2:1": [2, 1], "1:2": [1, 2],
+  };
+  const fallback = kind === "cover" ? [2, 3] : kind === "portrait" ? [3, 4] : [4, 3];
+  const [w, h] = ratioMap[aspectRatio] || fallback;
+  const long = 1024;
+  const round8 = (value) => Math.max(512, Math.min(1024, Math.round(value / 8) * 8));
+  if (w >= h) {
+    return { width: round8(long), height: round8((long * h) / w) };
+  }
+  return { width: round8((long * w) / h), height: round8(long) };
+}
+
+function delay(ms) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
 async function storeGeneratedImage({ url, b64Json, contentType, kind, label }) {
@@ -2481,6 +2840,7 @@ async function runDeepSeekApiChat({
   model,
   messages,
   temperature,
+  topP,
   maxTokens,
   responseFormat,
   timeoutMs,
@@ -2516,6 +2876,7 @@ async function runDeepSeekApiChat({
     messages,
     stream: false,
     temperature,
+    ...(Number.isFinite(topP) ? { top_p: topP } : {}),
     max_tokens: maxTokens,
     ...(responseFormat ? { response_format: responseFormat } : {}),
   };
@@ -3063,6 +3424,7 @@ Output rules:
 - Do not include analysis, planning, notes, comments, JSON, code fences, or model-thinking.
 - Do not mention that you are an AI.
 - Make it a real story, not an outline.
+- Invent freely to bring the idea to life: add vivid characters, names, places, objects, details and surprising plot turns. But stay true to the world, genre, time period, mood and tone that the user's idea implies; build outward from the idea, do not drift away from it. Everything you invent must fit the story and reinforce its atmosphere, never break it. Do not drop in unrelated elements (for example dinosaurs, war, monsters, robots, magic or space travel) unless the idea actually calls for them.
 - Finish the story. The final page must resolve or deliberately close the central situation.
 - Do not stop mid-sentence, mid-scene, or with an unfinished cliffhanger unless the user explicitly asks for a cliffhanger.
 - Genre, audience and tone may be UI hints written in another language. They must not override the required output language: ${language}.
@@ -3076,10 +3438,9 @@ Story quality rules:
 - Use concrete scenes and actions, not vague summaries.
 - If a reference file is provided, preserve confirmed character names, relationships, past events, and emotional history from that reference unless the user explicitly asks for a different version.
 - Include enough visual detail that later illustration prompts can infer characters, setting and objects.
-- Avoid random genre switches, unrelated twists, decorative filler, and abstract symbolism unless requested.
+- Keep the story coherent and satisfying. Imaginative twists, invented characters and new details are welcome when they fit the established setting and serve the user's idea; avoid random genre switches or out-of-place elements.
 - Do not sexualize characters. If the idea mentions a child, girl, boy, teenager or young person, keep body descriptions neutral and age-appropriate.
 - Do not add intimate body details, fetish clothing, or strange clothing words when the user did not ask for them.
-- Do not invent a completely different village, mountains, war, royal court, monsters, or other large setting unless the user asks for it.
 - If a sequel source story is provided, this output must be a vervolg/sequel: keep continuity with the selected database story and make the user's prompt the new episode, conflict, or next arc.
 - Keep chapters/pages readable aloud.
 
@@ -3561,25 +3922,34 @@ function assessStoryQuality(story, { title, pages, requestedWords, language }) {
   const repeatedSentenceRatio = sentenceRepeatRatio(story);
   const completeEnding = hasCompleteStoryEnding(story);
   const contrastTics = countContrastTics(story);
-  const reasons = [];
 
-  if (isGenericStoryTitle(title)) reasons.push("generieke titel");
-  if (pageMarkers < Math.min(2, pages)) reasons.push("ontbrekende paginamarkers");
-  if (wordCount < Math.max(160, Math.round(requestedWords * 0.72))) reasons.push("te weinig tekst");
-  if (!completeEnding) reasons.push("onaf einde");
-  if (/nederlands/i.test(language) && suspiciousTerms.length >= 1) reasons.push("onleesbaar pseudo-Nederlands");
-  if (sexualizedMinorTerms) reasons.push("ongepaste lichaamsbeschrijving bij jong personage");
-  if (longDigitRuns.length) reasons.push("cijferbrij in verhaaltekst");
-  if (words.length > 120 && uniqueRatio < 0.24) reasons.push("te veel woordherhaling");
-  if (repeatedSentenceRatio > 0.28) reasons.push("te veel herhaalde zinnen");
-  if (contrastTics > Math.max(2, Math.floor(pages / 2))) reasons.push("te veel niet-dit-maar-dat formuleringen");
+  // Hard failures actually block the story. Keep this list tight: only safety and
+  // a generation that produced almost no usable text. Everything else is stylistic
+  // and should not throw the whole story away: the user wants smooth generation.
+  const hardReasons = [];
+  if (sexualizedMinorTerms) hardReasons.push("ongepaste lichaamsbeschrijving bij jong personage");
+  if (wordCount < Math.max(80, Math.round(requestedWords * 0.35))) hardReasons.push("vrijwel geen verhaaltekst");
+
+  // Soft warnings: the story is still returned, the user just gets a gentle hint.
+  const warnings = [];
+  if (isGenericStoryTitle(title)) warnings.push("generieke titel");
+  if (pageMarkers < Math.min(2, pages)) warnings.push("weinig paginamarkers");
+  if (wordCount < Math.max(160, Math.round(requestedWords * 0.6))) warnings.push("korter dan gevraagd");
+  if (!completeEnding) warnings.push("mogelijk onaf einde");
+  if (/nederlands/i.test(language) && suspiciousTerms.length >= 2) warnings.push("mogelijk onleesbare woorden");
+  if (longDigitRuns.length) warnings.push("lange cijferreeksen");
+  if (words.length > 120 && uniqueRatio < 0.2) warnings.push("veel woordherhaling");
+  if (repeatedSentenceRatio > 0.35) warnings.push("herhaalde zinnen");
+  if (contrastTics > Math.max(4, pages)) warnings.push("veel niet-dit-maar-dat zinnen");
 
   return {
-    ok: reasons.length === 0,
-    message: reasons.length
-      ? `Het gekozen AI-model leverde geen bruikbaar verhaal (${reasons.join(", ")}). Probeer een diep model of minder pagina's.`
+    ok: hardReasons.length === 0,
+    hardFail: hardReasons.length > 0,
+    message: hardReasons.length
+      ? `Het AI-model leverde vrijwel geen bruikbare verhaaltekst (${hardReasons.join(", ")}). Probeer het opnieuw of kies een ander model.`
       : "verhaalkwaliteit voldoende",
-    reasons,
+    reasons: hardReasons,
+    warnings,
     wordCount,
     pageMarkers,
     uniqueRatio: Number(uniqueRatio.toFixed(3)),
