@@ -19,6 +19,14 @@ export type SavedBookCover = {
   jobId?: string;
 };
 
+export type StoryPromptMeta = {
+  characters: string;
+  plot: string;
+  mainEvent: string;
+  prompt: string;
+  updatedAt: string;
+};
+
 export type BookProject = {
   schema: "bookreader.project.v1";
   savedAt: string;
@@ -30,6 +38,7 @@ export type BookProject = {
   bookCover?: SavedBookCover;
   contextAnalysis?: unknown;
   filmPlan?: unknown;
+  storyPrompt?: StoryPromptMeta;
 };
 
 export function isBookProject(value: unknown): value is BookProject {

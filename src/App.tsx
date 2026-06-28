@@ -1,5 +1,6 @@
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowRight,
   BookOpen,
   BookImage,
   Clipboard,
@@ -12,12 +13,14 @@ import {
   Loader2,
   Pause,
   Play,
+  Plus,
   RefreshCw,
   Search,
   Server,
   Save,
   Sparkles,
   Square,
+  Tag,
   Trash2,
   Upload,
   Users,
@@ -31,19 +34,32 @@ import {
   cacheImage,
   ContextAnalysis,
   FilmPlan,
+  assignLibraryCategory,
+  deleteLibraryProject,
   generateIllustration,
   generateStory,
   getHealth,
   getIllustrationStatus,
   getModelCatalog,
+  createLibraryCategory,
+  importJsonProjectsToLibrary,
+  ImageProvider,
+  LibraryCategory,
+  LibraryProjectSummary,
+  listLibraryCategories,
+  listLibraryProjects,
   listProjectFiles,
   mediaUrl,
   ModelCatalogResponse,
   ModelOption,
+  openLibraryProject,
   openProjectFile,
   planFilm,
   ProjectFileSummary,
+  rechapterStory,
   saveDeepSeekApiKey,
+  saveLibraryProject,
+  saveXaiApiKey,
   synthesizeSpeech,
 } from "./lib/bookreaderApi";
 import {
@@ -54,6 +70,7 @@ import {
   SavedBookCover,
   SavedChapterIllustration,
   SavedCharacterPortrait,
+  StoryPromptMeta,
 } from "./lib/bookProject";
 import { Chapter, ChapterStats, MAX_WORDS, splitIntoChapters } from "./lib/chapters";
 import { parseFile } from "./lib/documentParser";
@@ -73,6 +90,10 @@ type StoryLanguage = "Auto" | "Nederlands" | "English" | "Deutsch" | "Français"
 type StoryNarrativePreset = "balanced" | "rich_intro";
 type ChapterIllustrationMap = Record<string, SavedChapterIllustration>;
 type CharacterPortraitRecord = CharacterPortrait & { imageUrl?: string };
+type ReferenceStoryProject = {
+  title: string;
+  rawText: string;
+};
 type SavedStoryEntry = {
   id: string;
   title: string;
@@ -117,6 +138,11 @@ const DEFAULT_NEGATIVE_PROMPT = [
   "abstract art",
   "modern art",
   "surreal unrelated composition",
+  "Jan Steen style",
+  "Dutch Golden Age painting",
+  "old master oil painting",
+  "tavern scene",
+  "caricature faces",
   "Anton Pieck style",
   "Anton Piek style",
   "nostalgic Dutch village painting",
@@ -125,6 +151,10 @@ const DEFAULT_NEGATIVE_PROMPT = [
   "extra main characters",
   "missing main character",
   "wrong character identity",
+  "deformed face",
+  "melted face",
+  "mutated eyes",
+  "bad anatomy",
 ].join(", ");
 
 const VOICE_STYLES: VoiceStyle[] = [
@@ -194,8 +224,13 @@ export function App() {
   const [modelCatalogBusy, setModelCatalogBusy] = useState(false);
   const [selectedLocalModel, setSelectedLocalModel] = useState("");
   const [selectedApiModel, setSelectedApiModel] = useState("");
+  const [selectedGrokModel, setSelectedGrokModel] = useState("");
+  const [imageProvider, setImageProvider] = useState<ImageProvider>("comfy");
+  const [selectedGrokImageModel, setSelectedGrokImageModel] = useState("");
   const [deepSeekApiKeyInput, setDeepSeekApiKeyInput] = useState("");
   const [deepSeekKeyBusy, setDeepSeekKeyBusy] = useState(false);
+  const [xaiApiKeyInput, setXaiApiKeyInput] = useState("");
+  const [xaiKeyBusy, setXaiKeyBusy] = useState(false);
   const [illustrationStyleId, setIllustrationStyleId] = useState<IllustrationStyleId>("storybook");
   const [illustrationPrompt, setIllustrationPrompt] = useState("");
   const [illustrationStatus, setIllustrationStatus] = useState("geen illustratie");
@@ -213,18 +248,40 @@ export function App() {
   const [contextAnalysis, setContextAnalysis] = useState<ContextAnalysis | null>(null);
   const [contextBusy, setContextBusy] = useState(false);
   const [contextStatus, setContextStatus] = useState("nog niet geanalyseerd");
-  const [storyPrompt, setStoryPrompt] = useState("Een meisje vindt onder een oude brug een zilveren deur die alleen bij maanlicht opengaat.");
+  const initialStoryPromptMeta = useMemo(() => {
+    const characters = "Luna / 17 / girl";
+    const plot = "Luna finds a silver door under an old bridge. The door only opens in moonlight and leads to a hidden place connected to her family history.";
+    const mainEvent = "Focus on the moment Luna opens the silver door for the first time and chooses whether to step through.";
+    return buildGuidedStoryPrompt(characters, plot, mainEvent);
+  }, []);
+  const [storyPrompt, setStoryPrompt] = useState(initialStoryPromptMeta.prompt);
+  const [storyPromptMeta, setStoryPromptMeta] = useState<StoryPromptMeta>(initialStoryPromptMeta);
+  const [promptBuilderOpen, setPromptBuilderOpen] = useState(false);
+  const [promptDraft, setPromptDraft] = useState(initialStoryPromptMeta.prompt);
+  const [promptCharacters, setPromptCharacters] = useState(initialStoryPromptMeta.characters);
+  const [promptPlot, setPromptPlot] = useState(initialStoryPromptMeta.plot);
+  const [promptMainEvent, setPromptMainEvent] = useState(initialStoryPromptMeta.mainEvent);
   const [storyPages, setStoryPages] = useState(4);
   const [storyWordsPerPage, setStoryWordsPerPage] = useState(550);
   const [storyLanguage, setStoryLanguage] = useState<StoryLanguage>("Auto");
   const [storyMode, setStoryMode] = useState<"fast" | "deep">("deep");
   const [storyNarrativePreset, setStoryNarrativePreset] = useState<StoryNarrativePreset>("balanced");
   const [aiProvider, setAiProvider] = useState<AiProvider>("local");
+  const [chapterTargetCount, setChapterTargetCount] = useState(8);
+  const [chapteringBusy, setChapteringBusy] = useState(false);
+  const [chapteringStatus, setChapteringStatus] = useState("AI-hoofdstukken klaar");
   const [storyGenre, setStoryGenre] = useState("avontuurlijk mysterie");
   const [storyTone, setStoryTone] = useState("beeldend, warm en spannend");
   const [referenceTitle, setReferenceTitle] = useState("");
   const [referenceText, setReferenceText] = useState("");
   const [referenceStatus, setReferenceStatus] = useState("geen referentie");
+  const [referenceStoryIds, setReferenceStoryIds] = useState<string[]>([]);
+  const [referenceStoryProjects, setReferenceStoryProjects] = useState<Record<string, ReferenceStoryProject>>({});
+  const [sequelSourceId, setSequelSourceId] = useState("");
+  const [sequelSourceTitle, setSequelSourceTitle] = useState("");
+  const [sequelSourceText, setSequelSourceText] = useState("");
+  const [sequelSourceCategoryIds, setSequelSourceCategoryIds] = useState<string[]>([]);
+  const [sequelStatus, setSequelStatus] = useState("geen vervolgbron");
   const [storyBusy, setStoryBusy] = useState(false);
   const [storyStatus, setStoryStatus] = useState("DeepSeek chatmodel schrijft betere verhalen dan R1");
   const [filmTargetMinutes, setFilmTargetMinutes] = useState(7);
@@ -235,7 +292,16 @@ export function App() {
   const [filmStatus, setFilmStatus] = useState("klaar voor adaptatie");
   const [assetStorageStatus, setAssetStorageStatus] = useState("beeldenmap: /home/pwintri2/BookReader/out/bookreader/images");
   const [projectBusy, setProjectBusy] = useState(false);
+  const [currentLibraryProjectId, setCurrentLibraryProjectId] = useState("");
   const [savedStories, setSavedStories] = useState<SavedStoryEntry[]>([]);
+  const [libraryStories, setLibraryStories] = useState<LibraryProjectSummary[]>([]);
+  const [libraryCategories, setLibraryCategories] = useState<LibraryCategory[]>([]);
+  const [libraryBusy, setLibraryBusy] = useState(false);
+  const [libraryStatus, setLibraryStatus] = useState("SQL-bibliotheek nog niet geladen");
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [selectedCategoryId, setSelectedCategoryId] = useState("");
+  const [assignCategoryId, setAssignCategoryId] = useState("");
+  const [draggedLibraryStoryId, setDraggedLibraryStoryId] = useState("");
   const [projectFiles, setProjectFiles] = useState<ProjectFileSummary[]>([]);
   const [projectScanBusy, setProjectScanBusy] = useState(false);
   const [projectScanStatus, setProjectScanStatus] = useState("JSON-bestanden nog niet gescand");
@@ -255,24 +321,51 @@ export function App() {
     if (!q) return chapters;
     return chapters.filter((chapter) => `${chapter.title} ${chapter.text}`.toLowerCase().includes(q));
   }, [chapters, query]);
+  const libraryStoryKeys = useMemo(() => new Set(libraryStories.map((entry) => storyIdentityKey(entry.title, entry.savedAt))), [libraryStories]);
+  const localStoryEntries = useMemo(
+    () => savedStories.filter((entry) => !libraryStoryKeys.has(storyIdentityKey(entry.title, entry.savedAt))),
+    [libraryStoryKeys, savedStories],
+  );
   const scannedStoryFiles = useMemo(() => {
-    const localKeys = new Set(savedStories.map((entry) => storyIdentityKey(entry.title, entry.savedAt)));
-    return projectFiles.filter((entry) => !localKeys.has(storyIdentityKey(entry.title, entry.savedAt)));
-  }, [projectFiles, savedStories]);
+    const knownKeys = new Set([
+      ...savedStories.map((entry) => storyIdentityKey(entry.title, entry.savedAt)),
+      ...libraryStories.map((entry) => storyIdentityKey(entry.title, entry.savedAt)),
+    ]);
+    return projectFiles.filter((entry) => !knownKeys.has(storyIdentityKey(entry.title, entry.savedAt)));
+  }, [libraryStories, projectFiles, savedStories]);
+  const visibleLibraryStories = useMemo(
+    () => (selectedCategoryId ? libraryStories.filter((entry) => entry.categoryIds.includes(selectedCategoryId)) : libraryStories),
+    [libraryStories, selectedCategoryId],
+  );
+  const activeStoryCategoryNames = useMemo(() => {
+    const active = libraryStories.find((entry) => entry.id === currentLibraryProjectId);
+    return active?.categories.map((category) => category.name).join(", ") || "";
+  }, [currentLibraryProjectId, libraryStories]);
 
   const selectedVoice = voices.find((voice) => voice.voiceURI === voiceURI) || voices[0];
   const selectedVoiceStyle = VOICE_STYLES.find((style) => style.id === voiceStyleId) || VOICE_STYLES[0];
   const apiOnline = apiHealth?.ok === true;
+  const normalizedAiProvider = normalizeAiProvider(aiProvider);
   const localModelOptions = useMemo(
     () => withSelectedModel(modelCatalog?.ollama.models || [], selectedLocalModel),
     [modelCatalog?.ollama.models, selectedLocalModel],
   );
-  const apiModelOptions = useMemo(
+  const deepseekModelOptions = useMemo(
     () => withSelectedModel(modelCatalog?.deepseekApi.models || [], selectedApiModel),
     [modelCatalog?.deepseekApi.models, selectedApiModel],
   );
-  const activeModelOptions = aiProvider === "api" ? apiModelOptions : localModelOptions;
-  const selectedAiModel = aiProvider === "api" ? selectedApiModel : selectedLocalModel;
+  const grokModelOptions = useMemo(
+    () => withSelectedModel(modelCatalog?.xaiApi.models || [], selectedGrokModel),
+    [modelCatalog?.xaiApi.models, selectedGrokModel],
+  );
+  const grokImageModelOptions = useMemo(
+    () => withSelectedModel(modelCatalog?.xaiImageApi.models || [], selectedGrokImageModel),
+    [modelCatalog?.xaiImageApi.models, selectedGrokImageModel],
+  );
+  const activeModelOptions =
+    normalizedAiProvider === "deepseek" ? deepseekModelOptions : normalizedAiProvider === "grok" ? grokModelOptions : localModelOptions;
+  const selectedAiModel =
+    normalizedAiProvider === "deepseek" ? selectedApiModel : normalizedAiProvider === "grok" ? selectedGrokModel : selectedLocalModel;
   const activeModelLabel = modelOptionLabel(activeModelOptions, selectedAiModel) || selectedAiModel || "standaardmodel";
 
   useEffect(() => {
@@ -327,8 +420,14 @@ export function App() {
     void refreshProjectFiles(false);
   }, []);
 
+  useEffect(() => {
+    void refreshLibrary(false);
+    void refreshCategories(false);
+  }, []);
+
   function processText(title: string, text: string) {
     const result = splitIntoChapters(text);
+    setCurrentLibraryProjectId("");
     setDocumentTitle(title || "Nieuw document");
     setRawText(text);
     setChapters(result.chapters);
@@ -388,11 +487,12 @@ export function App() {
     }
   }
 
-  function loadBookProject(project: BookProject) {
+  function loadBookProject(project: BookProject, libraryProjectId = "") {
     const result = splitIntoChapters(project.rawText);
     const chapterIllustrationList = Array.isArray(project.chapterIllustrations) ? project.chapterIllustrations : [];
     const portraitList = Array.isArray(project.characterPortraits) ? project.characterPortraits : [];
     const chapterMap = Object.fromEntries(chapterIllustrationList.map((item) => [item.chapterId, item]));
+    setCurrentLibraryProjectId(libraryProjectId);
     setDocumentTitle(project.title || "Nieuw document");
     setRawText(project.rawText);
     setChapters(result.chapters);
@@ -407,6 +507,22 @@ export function App() {
     setFilmStatus(project.filmPlan ? "filmplan geladen" : "klaar voor adaptatie");
     setBookCover(project.bookCover || { prompt: buildCoverPrompt(project.title, result.chapters, "storybook") });
     setCoverStatus(project.bookCover?.imageUrl ? "cover geladen" : "klaar voor cover");
+    if (project.storyPrompt?.prompt) {
+      setStoryPrompt(project.storyPrompt.prompt);
+      setStoryPromptMeta(project.storyPrompt);
+      setPromptDraft(project.storyPrompt.prompt);
+      setPromptCharacters(project.storyPrompt.characters || "");
+      setPromptPlot(project.storyPrompt.plot || "");
+      setPromptMainEvent(project.storyPrompt.mainEvent || "");
+    } else {
+      const emptyPrompt = buildGuidedStoryPrompt("", "", "");
+      setStoryPrompt("");
+      setStoryPromptMeta(emptyPrompt);
+      setPromptDraft("");
+      setPromptCharacters("");
+      setPromptPlot("");
+      setPromptMainEvent("");
+    }
     stopSpeech();
   }
 
@@ -438,21 +554,149 @@ export function App() {
     processText(documentTitle, rawText);
   }
 
+  function openPromptBuilder() {
+    setPromptDraft(storyPrompt || storyPromptMeta.prompt || "");
+    setPromptBuilderOpen(true);
+  }
+
+  function updatePromptDraftFromAnswers() {
+    const nextPrompt = buildGuidedStoryPrompt(promptCharacters, promptPlot, promptMainEvent);
+    if (!nextPrompt.characters.trim() || !nextPrompt.plot.trim() || !nextPrompt.mainEvent.trim()) {
+      setNotice("Vul alle drie de promptvragen in.");
+      return;
+    }
+    setPromptDraft(nextPrompt.prompt);
+    setNotice("Prompt bijgewerkt vanuit de antwoorden.");
+  }
+
+  function saveGuidedPrompt() {
+    const nextPrompt = buildGuidedStoryPrompt(promptCharacters, promptPlot, promptMainEvent);
+    const hasCompleteAnswers = Boolean(nextPrompt.characters.trim() && nextPrompt.plot.trim() && nextPrompt.mainEvent.trim());
+    const finalPrompt = promptDraft.trim();
+    if (!finalPrompt && !hasCompleteAnswers) {
+      setNotice("Vul de prompt in of beantwoord alle drie de promptvragen.");
+      return;
+    }
+    const savedPrompt = finalPrompt || nextPrompt.prompt;
+    const savedPromptMeta = { ...nextPrompt, prompt: savedPrompt, updatedAt: new Date().toISOString() };
+    setStoryPrompt(savedPrompt);
+    setStoryPromptMeta(savedPromptMeta);
+    setPromptDraft(savedPrompt);
+    setPromptBuilderOpen(false);
+    setNotice("Prompt gemaakt en bewaard bij dit verhaal.");
+  }
+
+  async function repartitionStoryWithAi() {
+    if (!rawText.trim()) {
+      setNotice("Geen verhaaltekst om te herverdelen.");
+      return;
+    }
+    setChapteringBusy(true);
+    const providerLabel = aiProviderLabel(aiProvider);
+    setChapteringStatus(`${providerLabel} ${activeModelLabel} herverdeelt het verhaal in hoofdstukken...`);
+    setNotice("");
+    try {
+      const response = await rechapterStory(apiBase, {
+        title: documentTitle,
+        rawText,
+        targetChapters: chapterTargetCount,
+        language: storyLanguage,
+        mode: storyMode,
+        provider: aiProvider,
+        model: selectedAiModel || undefined,
+      });
+      processText(response.title, response.story);
+      const responseProvider = responseProviderLabel(response.provider);
+      setChapteringStatus(
+        `${responseProvider} ${response.model}: ${response.chapterCount} hoofdstukken, ${response.wordCount.toLocaleString("nl-NL")} woorden`,
+      );
+      setNotice(response.warning || `Verhaal opnieuw verdeeld in ${response.chapterCount} hoofdstukken.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "AI-hoofdstukken konden niet worden gemaakt.";
+      setChapteringStatus(message);
+      setNotice(message);
+    } finally {
+      setChapteringBusy(false);
+    }
+  }
+
+  function combinedReferencePayload() {
+    const databaseReferences = referenceStoryIds
+      .map((id) => referenceStoryProjects[id])
+      .filter((project): project is ReferenceStoryProject => Boolean(project?.rawText?.trim()));
+    const title = [
+      referenceTitle,
+      ...databaseReferences.map((project) => project.title),
+    ].filter(Boolean).join(" + ");
+    const text = [
+      referenceText.trim() ? `# ${referenceTitle || "Geupload referentiebestand"}\n${referenceText}` : "",
+      ...databaseReferences.map((project) => `# ${project.title}\n${project.rawText}`),
+    ].filter(Boolean).join("\n\n---\n\n");
+    return { title, text };
+  }
+
+  async function saveUploadedReferenceToDatabase() {
+    if (!referenceText.trim()) {
+      setNotice("Laad eerst een referentiebestand.");
+      return;
+    }
+    setLibraryBusy(true);
+    try {
+      const savedAt = new Date().toISOString();
+      const title = referenceTitle.trim() || `Referentie ${formatSavedAt(savedAt)}`;
+      const parsedReference = splitIntoChapters(referenceText);
+      const project = {
+        schema: "bookreader.project.v1",
+        savedAt,
+        title,
+        rawText: referenceText,
+        illustrationStyleId,
+        chapterIllustrations: [],
+        characterPortraits: [],
+        bookCover: { prompt: buildCoverPrompt(title, parsedReference.chapters, illustrationStyleId) },
+      } satisfies BookProject;
+      const category = await createLibraryCategory(apiBase, "Referenties");
+      const saved = await saveLibraryProject(apiBase, project, [category.category.id]);
+      saveStoryToLibrary(project);
+      setReferenceStoryProjects((current) => ({
+        ...current,
+        [saved.project.id]: {
+          title: saved.project.title,
+          rawText: referenceText,
+        },
+      }));
+      setReferenceStoryIds((current) => (current.includes(saved.project.id) ? current : [...current, saved.project.id]));
+      await refreshLibrary(false);
+      await refreshCategories(false);
+      setAssignCategoryId(category.category.id);
+      setReferenceStatus(`${saved.project.title} opgeslagen in SQL en aangevinkt als referentie`);
+      setNotice(`${saved.project.title} staat in SQL onder Referenties.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Referentie kon niet in SQL worden opgeslagen.";
+      setReferenceStatus(message);
+      setNotice(message);
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
   async function createStoryFromPrompt() {
     if (!storyPrompt.trim()) {
       setNotice("Geef eerst een verhaalprompt.");
       return;
     }
     setStoryBusy(true);
-    const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
+    const providerLabel = aiProviderLabel(aiProvider);
     const presetLabel = storyNarrativePreset === "rich_intro" ? " met veel detail en lange intro" : "";
+    const sequelLabel = sequelSourceText ? ` als vervolg op ${sequelSourceTitle || "het gekozen verhaal"}` : "";
     setStoryStatus(
       storyMode === "deep"
-        ? `${providerLabel} ${activeModelLabel} schrijft uitgebreid${presetLabel}...`
-        : `${providerLabel} ${activeModelLabel} schrijft kort${presetLabel}...`,
+        ? `${providerLabel} ${activeModelLabel} schrijft uitgebreid${presetLabel}${sequelLabel}...`
+        : `${providerLabel} ${activeModelLabel} schrijft kort${presetLabel}${sequelLabel}...`,
     );
     setNotice("");
     try {
+      const references = combinedReferencePayload();
       const response = await generateStory(apiBase, {
         prompt: storyPrompt,
         pages: storyPages,
@@ -465,14 +709,41 @@ export function App() {
         provider: aiProvider,
         model: selectedAiModel || undefined,
         narrativePreset: storyNarrativePreset,
-        referenceTitle,
-        referenceText,
+        referenceTitle: references.title,
+        referenceText: references.text,
+        sequelOfTitle: sequelSourceTitle,
+        sequelOfText: sequelSourceText,
       });
       processText(response.title, response.story);
-      const responseProvider = response.provider === "deepseek-api" ? "API" : "lokaal";
+      const savedAt = new Date().toISOString();
+      const generatedChapters = splitIntoChapters(response.story).chapters;
+      const generatedProject = {
+        schema: "bookreader.project.v1",
+        savedAt,
+        title: response.title,
+        rawText: response.story,
+        illustrationStyleId,
+        chapterIllustrations: [],
+        characterPortraits: [],
+        bookCover: { prompt: buildCoverPrompt(response.title, generatedChapters, illustrationStyleId) },
+        storyPrompt: storyPromptMeta,
+      } satisfies BookProject;
+      saveStoryToLibrary(generatedProject);
+      let libraryNote = "";
+      try {
+        const inheritedCategoryIds = sequelSourceCategoryIds.length ? sequelSourceCategoryIds : selectedCategoryId ? [selectedCategoryId] : [];
+        const saved = await saveLibraryProject(apiBase, generatedProject, inheritedCategoryIds);
+        setCurrentLibraryProjectId(saved.project.id);
+        await refreshLibrary(false);
+        await refreshCategories(false);
+        libraryNote = " en in SQL opgeslagen";
+      } catch {
+        libraryNote = "";
+      }
+      const responseProvider = responseProviderLabel(response.provider);
       const languageNote = response.language ? `, ${response.language}` : "";
       setStoryStatus(`${responseProvider} ${response.model}: ${response.wordCount.toLocaleString("nl-NL")} woorden gemaakt${languageNote}`);
-      setNotice(`Verhaal geladen: ${response.title}`);
+      setNotice(`Verhaal geladen: ${response.title}${libraryNote}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Verhaal kon niet worden gemaakt.";
       setStoryStatus(message);
@@ -488,7 +759,7 @@ export function App() {
       return;
     }
     setFilmBusy(true);
-    const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
+    const providerLabel = aiProviderLabel(aiProvider);
     setFilmStatus(`${providerLabel} ${activeModelLabel} maakt een scene breakdown...`);
     setNotice("");
     try {
@@ -503,8 +774,7 @@ export function App() {
         model: selectedAiModel || undefined,
       });
       setFilmPlan(response.plan);
-      const responseProvider =
-        response.provider === "deepseek-api" ? "API" : response.provider === "ollama" ? "lokaal" : "fallback";
+      const responseProvider = responseProviderLabel(response.provider);
       const fallbackNote = response.fallbackUsed ? " + lokale fallback" : "";
       setFilmStatus(
         `${responseProvider} ${response.model} (${response.mode})${fallbackNote}: ${response.plan.scenes.length} scènes, ${formatDuration(
@@ -672,8 +942,9 @@ export function App() {
       }
       const ttsLabel = health.tts?.configured ? "TTS aan" : "TTS uit";
       const comfyLabel = health.comfy?.workflowConfigured ? "Comfy workflow aan" : "Comfy workflow uit";
-      const apiLabel = health.deepseekApi?.configured ? "DeepSeek API aan" : "DeepSeek API key ontbreekt";
-      setApiStatus(`${ttsLabel}, ${comfyLabel}, ${apiLabel}`);
+      const deepseekLabel = health.deepseekApi?.configured ? "DeepSeek API aan" : "DeepSeek key ontbreekt";
+      const grokLabel = health.xaiApi?.configured ? "Grok API aan" : "Grok key ontbreekt";
+      setApiStatus(`${ttsLabel}, ${comfyLabel}, ${deepseekLabel}, ${grokLabel}`);
       if (showNotice) setNotice("Serverlaag bereikt.");
     } catch (error) {
       setApiHealth(null);
@@ -698,12 +969,25 @@ export function App() {
         ]),
       );
       setSelectedApiModel((current) => chooseCatalogModel(current, catalog.deepseekApi.models, [catalog.defaults.api.story, catalog.defaults.api.context]));
+      setSelectedGrokModel((current) => chooseCatalogModel(current, catalog.xaiApi.models, [catalog.defaults.xai.film, catalog.defaults.xai.story, catalog.defaults.xai.context]));
+      setSelectedGrokImageModel((current) => chooseCatalogModel(current, catalog.xaiImageApi.models, [catalog.defaults.xai.image]));
       const ollamaLabel = catalog.ollama.models.length ? `${catalog.ollama.models.length} Ollama` : "geen Ollama";
-      const apiLabel = catalog.deepseekApi.models.length ? `${catalog.deepseekApi.models.length} DeepSeek API` : "geen DeepSeek API";
-      const warning = [catalog.ollama.error ? "Ollama lijst niet live" : "", catalog.deepseekApi.error ? "DeepSeek lijst fallback" : ""]
+      const deepseekLabel = catalog.deepseekApi.models.length ? `${catalog.deepseekApi.models.length} DeepSeek API` : "geen DeepSeek API";
+      const grokLabel = catalog.xaiApi.models.length ? `${catalog.xaiApi.models.length} Grok API` : "geen Grok API";
+      const grokImageLabel = catalog.xaiImageApi.models.length ? `${catalog.xaiImageApi.models.length} Grok beeld` : "geen Grok beeld";
+      const warning = [
+        catalog.ollama.error ? "Ollama lijst niet live" : "",
+        catalog.deepseekApi.error ? "DeepSeek lijst fallback" : "",
+        catalog.xaiApi.error ? "Grok lijst fallback" : "",
+        catalog.xaiImageApi.error ? "Grok beeldlijst fallback" : "",
+      ]
         .filter(Boolean)
         .join(", ");
-      setModelCatalogStatus(warning ? `${ollamaLabel}, ${apiLabel} (${warning})` : `${ollamaLabel}, ${apiLabel}`);
+      setModelCatalogStatus(
+        warning
+          ? `${ollamaLabel}, ${deepseekLabel}, ${grokLabel}, ${grokImageLabel} (${warning})`
+          : `${ollamaLabel}, ${deepseekLabel}, ${grokLabel}, ${grokImageLabel}`,
+      );
       if (showNotice) setNotice("Modellenlijst bijgewerkt.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Modellenlijst kon niet worden geladen.";
@@ -740,7 +1024,7 @@ export function App() {
     try {
       const response = await saveDeepSeekApiKey(apiBase, "", true);
       setDeepSeekApiKeyInput("");
-      setAiProvider("local");
+      if (normalizeAiProvider(aiProvider) === "deepseek") setAiProvider("local");
       setNotice(response.message || "DeepSeek API key is gewist.");
       await refreshApiHealth(false);
       await refreshModelCatalog(false);
@@ -752,6 +1036,44 @@ export function App() {
     }
   }
 
+  async function saveXaiKey() {
+    const apiKey = xaiApiKeyInput.trim();
+    if (!apiKey) {
+      setNotice("Plak eerst een Grok/xAI API key.");
+      return;
+    }
+    setXaiKeyBusy(true);
+    try {
+      const response = await saveXaiApiKey(apiBase, apiKey);
+      setXaiApiKeyInput("");
+      setNotice(response.message || "Grok API key is opgeslagen.");
+      await refreshApiHealth(false);
+      await refreshModelCatalog(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Grok API key kon niet worden opgeslagen.";
+      setNotice(message);
+    } finally {
+      setXaiKeyBusy(false);
+    }
+  }
+
+  async function clearXaiKey() {
+    setXaiKeyBusy(true);
+    try {
+      const response = await saveXaiApiKey(apiBase, "", true);
+      setXaiApiKeyInput("");
+      if (normalizeAiProvider(aiProvider) === "grok") setAiProvider("local");
+      setNotice(response.message || "Grok API key is gewist.");
+      await refreshApiHealth(false);
+      await refreshModelCatalog(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Grok API key kon niet worden gewist.";
+      setNotice(message);
+    } finally {
+      setXaiKeyBusy(false);
+    }
+  }
+
   async function cacheGeneratedImage(imageUrl: string, kind: string, label?: string): Promise<string> {
     const cached = await cacheImage(apiBase, imageUrl, kind, label);
     if (cached.filePath) {
@@ -760,36 +1082,67 @@ export function App() {
     return mediaUrl(apiBase, cached.imageUrl);
   }
 
+  async function resolveImageJob(job: Awaited<ReturnType<typeof generateIllustration>>, kind: "chapter" | "cover" | "portrait", label: string) {
+    if (job.imageUrl) {
+      if (job.filePath) {
+        setAssetStorageStatus(`Laatste beeld opgeslagen: ${job.filePath}`);
+      }
+      return {
+        imageUrl: mediaUrl(apiBase, job.imageUrl),
+        jobId: job.promptId || "",
+      };
+    }
+    if (!job.promptId) {
+      throw new Error(job.message || `${imageProviderLabel(imageProvider)} gaf geen beeldjob terug.`);
+    }
+    const status = await pollIllustration(job.promptId);
+    const firstImage = status.images[0];
+    if (!firstImage) {
+      return {
+        imageUrl: "",
+        jobId: job.promptId,
+      };
+    }
+    return {
+      imageUrl: await cacheGeneratedImage(mediaUrl(apiBase, firstImage.url), kind, label),
+      jobId: job.promptId,
+    };
+  }
+
+  function selectedImageModel(): string | undefined {
+    return imageProvider === "grok" ? selectedGrokImageModel || modelCatalog?.defaults.xai.image : undefined;
+  }
+
   async function createIllustration() {
     if (!selectedChapter) return;
     setIllustrationBusy(true);
-    setIllustrationStatus("ComfyUI job starten...");
+    setIllustrationStatus(`${imageProviderLabel(imageProvider)} job starten...`);
     setNotice("");
     try {
       const job = await generateIllustration(apiBase, {
         prompt: illustrationPrompt || buildIllustrationPrompt(documentTitle, selectedChapter, illustrationStyleId),
         negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+        provider: imageProvider,
+        model: selectedImageModel(),
+        kind: "chapter",
+        label: selectedChapter.title,
+        aspectRatio: "4:3",
       });
-      if (!job.promptId) {
-        throw new Error(job.message || "ComfyUI gaf geen prompt-id terug.");
-      }
-      setIllustrationJobId(job.promptId);
-      setIllustrationStatus("ComfyUI rendert...");
-      const status = await pollIllustration(job.promptId);
-      const firstImage = status.images[0];
-      if (!firstImage) {
+      setIllustrationJobId(job.promptId || "");
+      setIllustrationStatus(`${imageProviderLabel(imageProvider)} rendert...`);
+      const resolved = await resolveImageJob(job, "chapter", selectedChapter.title);
+      if (!resolved.imageUrl) {
         setIllustrationStatus("Nog geen afbeelding terug.");
         return;
       }
-      const imageUrl = await cacheGeneratedImage(mediaUrl(apiBase, firstImage.url), "chapter", selectedChapter.title);
-      setIllustrationUrl(imageUrl);
+      setIllustrationUrl(resolved.imageUrl);
       setChapterIllustrations((previous) => ({
         ...previous,
         [selectedChapter.id]: {
           chapterId: selectedChapter.id,
           prompt: illustrationPrompt,
-          imageUrl,
-          jobId: job.promptId,
+          imageUrl: resolved.imageUrl,
+          jobId: resolved.jobId,
           },
       }));
       setIllustrationStatus("illustratie klaar en lokaal opgeslagen");
@@ -819,7 +1172,7 @@ export function App() {
       return;
     }
     setContextBusy(true);
-    const providerLabel = aiProvider === "api" ? "DeepSeek API" : "DeepSeek lokaal";
+    const providerLabel = aiProviderLabel(aiProvider);
     setContextStatus(
       mode === "deep"
         ? `${providerLabel} ${activeModelLabel} doet diepe verhaalcontext...`
@@ -847,9 +1200,9 @@ export function App() {
       }
       const fallbackNote = response.fallbackUsed ? " + lokale kwaliteitsfallback" : "";
       const modeLabel = response.mode === "deep" ? "diep" : "snel";
-      const responseProvider = response.provider === "deepseek-api" ? "API" : "lokaal";
-      setContextStatus(`DeepSeek ${responseProvider} ${response.model} (${modeLabel})${fallbackNote}: ${analysis.characters.length} karakter(s), context toegepast`);
-      setNotice(response.warning || "DeepSeek-context toegepast op prompts, cover en portretten.");
+      const responseProvider = responseProviderLabel(response.provider);
+      setContextStatus(`${responseProvider} ${response.model} (${modeLabel})${fallbackNote}: ${analysis.characters.length} karakter(s), context toegepast`);
+      setNotice(response.warning || "AI-context toegepast op prompts, cover en portretten.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "DeepSeek-contextanalyse is mislukt.";
       setContextStatus(message);
@@ -861,27 +1214,27 @@ export function App() {
 
   async function createBookCover() {
     setCoverBusy(true);
-    setCoverStatus("ComfyUI coverjob starten...");
+    setCoverStatus(`${imageProviderLabel(imageProvider)} coverjob starten...`);
     try {
       const job = await generateIllustration(apiBase, {
         prompt: bookCover.prompt || buildCoverPrompt(documentTitle, chapters, illustrationStyleId),
         negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+        provider: imageProvider,
+        model: selectedImageModel(),
+        kind: "cover",
+        label: documentTitle,
+        aspectRatio: "2:3",
       });
-      if (!job.promptId) {
-        throw new Error(job.message || "ComfyUI gaf geen prompt-id terug.");
-      }
       setCoverStatus("cover rendert...");
-      const status = await pollIllustration(job.promptId);
-      const firstImage = status.images[0];
-      if (!firstImage) {
+      const resolved = await resolveImageJob(job, "cover", documentTitle);
+      if (!resolved.imageUrl) {
         setCoverStatus("Nog geen cover terug.");
         return;
       }
-      const imageUrl = await cacheGeneratedImage(mediaUrl(apiBase, firstImage.url), "cover", documentTitle);
       setBookCover((previous) => ({
         ...previous,
-        imageUrl,
-        jobId: job.promptId,
+        imageUrl: resolved.imageUrl,
+        jobId: resolved.jobId,
       }));
       setCoverStatus("cover klaar en lokaal opgeslagen");
     } catch (error) {
@@ -899,19 +1252,19 @@ export function App() {
       const job = await generateIllustration(apiBase, {
         prompt: character.prompt,
         negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+        provider: imageProvider,
+        model: selectedImageModel(),
+        kind: "portrait",
+        label: character.name,
+        aspectRatio: "3:4",
       });
-      if (!job.promptId) {
-        throw new Error(job.message || "ComfyUI gaf geen prompt-id terug.");
-      }
-      const status = await pollIllustration(job.promptId);
-      const firstImage = status.images[0];
-      if (!firstImage) {
+      const resolved = await resolveImageJob(job, "portrait", character.name);
+      if (!resolved.imageUrl) {
         setNotice(`Nog geen portret terug voor ${character.name}.`);
         return;
       }
-      const imageUrl = await cacheGeneratedImage(mediaUrl(apiBase, firstImage.url), "portrait", character.name);
       setCharacterPortraits((previous) =>
-        previous.map((item) => (item.id === character.id ? { ...item, imageUrl } : item)),
+        previous.map((item) => (item.id === character.id ? { ...item, imageUrl: resolved.imageUrl } : item)),
       );
       setNotice(`Portret klaar en lokaal opgeslagen voor ${character.name}.`);
     } catch (error) {
@@ -961,10 +1314,23 @@ export function App() {
         bookCover: savedCover,
         contextAnalysis,
         filmPlan,
+        storyPrompt: storyPromptMeta,
       } satisfies BookProject;
+      let librarySaved = false;
+      let libraryError = "";
+      try {
+        const currentCategoryIds = libraryStories.find((entry) => entry.id === currentLibraryProjectId)?.categoryIds || [];
+        const saved = await saveLibraryProject(apiBase, libraryProject, currentCategoryIds.length ? currentCategoryIds : selectedCategoryId ? [selectedCategoryId] : []);
+        setCurrentLibraryProjectId(saved.project.id);
+        await refreshLibrary(false);
+        await refreshCategories(false);
+        librarySaved = true;
+      } catch (error) {
+        libraryError = error instanceof Error ? error.message : "SQL-bibliotheek niet bereikbaar";
+      }
       downloadBookProject(project);
       saveStoryToLibrary(libraryProject);
-      setNotice("Project opgeslagen.");
+      setNotice(librarySaved ? "Project opgeslagen in SQL en als JSON gedownload." : `Project als JSON opgeslagen. SQL niet bijgewerkt: ${libraryError}`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Project kon niet worden opgeslagen.");
     } finally {
@@ -982,6 +1348,7 @@ export function App() {
   }
 
   function clearDocument() {
+    setCurrentLibraryProjectId("");
     processText("Nieuw document", "");
     setRawText("");
     setChapters([]);
@@ -990,6 +1357,13 @@ export function App() {
     setCharacterPortraits([]);
     setBookCover({ prompt: "" });
     setCoverStatus("klaar voor cover");
+    setStoryPrompt(initialStoryPromptMeta.prompt);
+    setStoryPromptMeta(initialStoryPromptMeta);
+    setPromptDraft(initialStoryPromptMeta.prompt);
+    setPromptCharacters(initialStoryPromptMeta.characters);
+    setPromptPlot(initialStoryPromptMeta.plot);
+    setPromptMainEvent(initialStoryPromptMeta.mainEvent);
+    setPromptBuilderOpen(false);
     setNotice("");
   }
 
@@ -1011,6 +1385,7 @@ export function App() {
       bookCover,
       contextAnalysis,
       filmPlan,
+      storyPrompt: storyPromptMeta,
     };
   }
 
@@ -1053,6 +1428,262 @@ export function App() {
     }
   }
 
+  async function refreshLibrary(showNotice = true) {
+    setLibraryBusy(true);
+    try {
+      const response = await listLibraryProjects(apiBase);
+      setLibraryStories(response.projects);
+      const message = `${response.projects.length} SQL-verhalen beschikbaar`;
+      setLibraryStatus(message);
+      if (showNotice) setNotice(message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "SQL-bibliotheek kon niet worden geladen.";
+      setLibraryStatus("SQL-bibliotheek niet beschikbaar");
+      if (showNotice) setNotice(message);
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function refreshCategories(showNotice = true) {
+    try {
+      const response = await listLibraryCategories(apiBase);
+      setLibraryCategories(response.categories);
+      setAssignCategoryId((current) => current || response.categories[0]?.id || "");
+      if (showNotice) setNotice(`${response.categories.length} categorieën beschikbaar`);
+    } catch (error) {
+      if (showNotice) setNotice(error instanceof Error ? error.message : "Categorieën konden niet worden geladen.");
+    }
+  }
+
+  async function createCategory() {
+    const name = newCategoryName.trim();
+    if (!name) {
+      setNotice("Geef eerst een categorienaam.");
+      return;
+    }
+    setLibraryBusy(true);
+    try {
+      const response = await createLibraryCategory(apiBase, name);
+      setNewCategoryName("");
+      setAssignCategoryId(response.category.id);
+      setSelectedCategoryId(response.category.id);
+      await refreshCategories(false);
+      await refreshLibrary(false);
+      setNotice(`Categorie gemaakt: ${response.category.name}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Categorie kon niet worden gemaakt.");
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function assignCurrentStoryToCategory() {
+    const categoryId = assignCategoryId || selectedCategoryId;
+    if (!categoryId) {
+      setNotice("Maak of kies eerst een categorie.");
+      return;
+    }
+    if (!rawText.trim()) {
+      setNotice("Er is geen huidig verhaal om in een categorie te plaatsen.");
+      return;
+    }
+    setLibraryBusy(true);
+    try {
+      let projectId = currentLibraryProjectId;
+      if (!projectId) {
+        const saved = await saveLibraryProject(apiBase, currentBookProject(new Date().toISOString()), [categoryId]);
+        projectId = saved.project.id;
+        setCurrentLibraryProjectId(projectId);
+      } else {
+        await assignLibraryCategory(apiBase, projectId, categoryId);
+      }
+      await refreshLibrary(false);
+      await refreshCategories(false);
+      const categoryName = libraryCategories.find((category) => category.id === categoryId)?.name || "categorie";
+      setNotice(`${documentTitle} staat nu in ${categoryName}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Verhaal kon niet in de categorie worden geplaatst.");
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function assignLibraryStoryToCategory(projectId: string, categoryId: string) {
+    if (!projectId || !categoryId) return;
+    setLibraryBusy(true);
+    try {
+      const response = await assignLibraryCategory(apiBase, projectId, categoryId);
+      await refreshLibrary(false);
+      await refreshCategories(false);
+      const categoryName = response.project.categories.find((category) => category.id === categoryId)?.name || "categorie";
+      setNotice(`${response.project.title} staat nu in ${categoryName}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Verhaal kon niet in de categorie worden geplaatst.");
+    } finally {
+      setDraggedLibraryStoryId("");
+      setLibraryBusy(false);
+    }
+  }
+
+  async function dropStoryOnCategory(categoryId: string) {
+    if (!draggedLibraryStoryId) return;
+    await assignLibraryStoryToCategory(draggedLibraryStoryId, categoryId);
+  }
+
+  async function deleteLibraryStory(entry: LibraryProjectSummary) {
+    const ok = window.confirm(`Verhaal "${entry.title}" uit de SQL-bibliotheek verwijderen? Het JSON-bestand op schijf blijft staan.`);
+    if (!ok) return;
+    setLibraryBusy(true);
+    try {
+      await deleteLibraryProject(apiBase, entry.id);
+      if (currentLibraryProjectId === entry.id) {
+        setCurrentLibraryProjectId("");
+      }
+      if (sequelSourceId === entry.id) {
+        clearSequelSource();
+      }
+      setReferenceStoryIds((current) => current.filter((id) => id !== entry.id));
+      setReferenceStoryProjects((current) => {
+        const next = { ...current };
+        delete next[entry.id];
+        return next;
+      });
+      await refreshLibrary(false);
+      await refreshCategories(false);
+      setNotice(`${entry.title} is verwijderd uit SQL.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "SQL-verhaal kon niet worden verwijderd.");
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function toggleReferenceStory(entry: LibraryProjectSummary) {
+    if (referenceStoryIds.includes(entry.id)) {
+      setReferenceStoryIds((current) => current.filter((id) => id !== entry.id));
+      setReferenceStoryProjects((current) => {
+        const next = { ...current };
+        delete next[entry.id];
+        return next;
+      });
+      setNotice(`${entry.title} is geen referentie meer.`);
+      return;
+    }
+
+    setLibraryBusy(true);
+    try {
+      const response = await openLibraryProject(apiBase, entry.id);
+      if (!isBookProject(response.project)) {
+        throw new Error("Dit SQL-record is geen geldig BookReader-project.");
+      }
+      setReferenceStoryProjects((current) => ({
+        ...current,
+        [entry.id]: {
+          title: response.project.title || entry.title,
+          rawText: response.project.rawText || "",
+        },
+      }));
+      setReferenceStoryIds((current) => (current.includes(entry.id) ? current : [...current, entry.id]));
+      setNotice(`${entry.title} toegevoegd als referentie.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Referentieverhaal kon niet worden geladen.");
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  function clearDatabaseReferences() {
+    setReferenceStoryIds([]);
+    setReferenceStoryProjects({});
+    setNotice("Database-referenties gewist.");
+  }
+
+  async function importJsonToLibrary() {
+    setLibraryBusy(true);
+    try {
+      const response = await importJsonProjectsToLibrary(apiBase);
+      await refreshLibrary(false);
+      await refreshCategories(false);
+      const message = `${response.imported} JSON-verhalen in SQL gezet`;
+      setLibraryStatus(message);
+      setNotice(message);
+      await refreshProjectFiles(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "JSON-verhalen konden niet naar SQL worden geïmporteerd.";
+      setLibraryStatus("import mislukt");
+      setNotice(message);
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function openLibraryStory(entry: LibraryProjectSummary) {
+    setProjectBusy(true);
+    try {
+      const response = await openLibraryProject(apiBase, entry.id);
+      if (!isBookProject(response.project)) {
+        throw new Error("Dit SQL-record is geen geldig BookReader-project.");
+      }
+      loadBookProject(response.project, entry.id);
+      setNotice(`${entry.title} geopend uit SQL-bibliotheek.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "SQL-verhaal kon niet worden geopend.");
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
+  async function chooseSequelSource(projectId: string) {
+    if (!projectId) {
+      clearSequelSource();
+      return;
+    }
+    setLibraryBusy(true);
+    setSequelStatus("vervolgbron wordt geladen...");
+    try {
+      const response = await openLibraryProject(apiBase, projectId);
+      if (!isBookProject(response.project)) {
+        throw new Error("Dit SQL-record is geen geldig BookReader-project.");
+      }
+      const summary = response.summary || libraryStories.find((entry) => entry.id === projectId);
+      setSequelSourceId(projectId);
+      setSequelSourceTitle(response.project.title || summary?.title || "Gekozen verhaal");
+      setSequelSourceText(response.project.rawText || "");
+      setSequelSourceCategoryIds(summary?.categoryIds || []);
+      setSequelStatus(`vervolg op: ${response.project.title || summary?.title || "gekozen verhaal"}`);
+      setNotice(`Vervolgbron gekozen: ${response.project.title || summary?.title || "gekozen verhaal"}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Vervolgbron kon niet worden geladen.";
+      setSequelStatus(message);
+      setNotice(message);
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  function chooseCurrentStoryAsSequelSource() {
+    if (!rawText.trim()) {
+      setNotice("Er is geen huidig verhaal om als vervolgbron te gebruiken.");
+      return;
+    }
+    const active = libraryStories.find((entry) => entry.id === currentLibraryProjectId);
+    setSequelSourceId(currentLibraryProjectId);
+    setSequelSourceTitle(documentTitle || "Huidig verhaal");
+    setSequelSourceText(rawText);
+    setSequelSourceCategoryIds(active?.categoryIds || []);
+    setSequelStatus(`vervolg op huidig verhaal: ${documentTitle || "Huidig verhaal"}`);
+    setNotice("Het huidige verhaal is ingesteld als vervolgbron.");
+  }
+
+  function clearSequelSource() {
+    setSequelSourceId("");
+    setSequelSourceTitle("");
+    setSequelSourceText("");
+    setSequelSourceCategoryIds([]);
+    setSequelStatus("geen vervolgbron");
+  }
+
   async function openProjectFileEntry(entry: ProjectFileSummary) {
     setProjectBusy(true);
     try {
@@ -1086,18 +1717,136 @@ export function App() {
             <Clock size={17} />
             <span>Verhalen</span>
           </div>
+          <button type="button" className="quiet" onClick={() => void refreshLibrary(true)} disabled={libraryBusy}>
+            {libraryBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
+            <span>Scan SQL</span>
+          </button>
+          <button type="button" className="quiet" onClick={() => void importJsonToLibrary()} disabled={libraryBusy}>
+            {libraryBusy ? <Loader2 size={16} /> : <Save size={16} />}
+            <span>JSON naar SQL</span>
+          </button>
           <button type="button" className="quiet" onClick={() => void refreshProjectFiles(true)} disabled={projectScanBusy}>
             {projectScanBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
             <span>Scan JSON</span>
           </button>
-          {savedStories.length || scannedStoryFiles.length ? (
+          <div className="button-row">
+            <label className="field compact-field">
+              <span>Categorie</span>
+              <select value={selectedCategoryId} onChange={(event) => setSelectedCategoryId(event.target.value)}>
+                <option value="">Alle SQL-verhalen</option>
+                {libraryCategories.map((category) => (
+                  <option value={category.id} key={category.id}>
+                    {category.name} ({category.projectCount})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field compact-field">
+              <span>Nieuwe categorie</span>
+              <input value={newCategoryName} onChange={(event) => setNewCategoryName(event.target.value)} />
+            </label>
+            <button
+              type="button"
+              className="quiet icon-button model-refresh-button"
+              onClick={() => void createCategory()}
+              disabled={libraryBusy || !newCategoryName.trim()}
+              title="Categorie maken"
+              aria-label="Categorie maken"
+            >
+              <Plus size={16} />
+            </button>
+          </div>
+          {libraryCategories.length ? (
+            <div className="category-drop-list">
+              {libraryCategories.map((category) => (
+                <button
+                  type="button"
+                  className={`quiet category-drop-zone ${draggedLibraryStoryId ? "drop-ready" : ""}`}
+                  key={category.id}
+                  onClick={() => setSelectedCategoryId(category.id)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    void dropStoryOnCategory(category.id);
+                  }}
+                  title="Sleep een SQL-verhaal hierheen om het in deze categorie te plaatsen"
+                >
+                  <Tag size={14} />
+                  <span>{category.name}</span>
+                  <small>{category.projectCount}</small>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <div className="button-row">
+            <label className="field compact-field">
+              <span>Plaats huidig in</span>
+              <select value={assignCategoryId} onChange={(event) => setAssignCategoryId(event.target.value)} disabled={!libraryCategories.length}>
+                {libraryCategories.length ? (
+                  libraryCategories.map((category) => (
+                    <option value={category.id} key={category.id}>
+                      {category.name}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">Geen categorieën</option>
+                )}
+              </select>
+            </label>
+            <button type="button" className="quiet" onClick={() => void assignCurrentStoryToCategory()} disabled={libraryBusy || !assignCategoryId || !rawText.trim()}>
+              {libraryBusy ? <Loader2 size={16} /> : <Tag size={16} />}
+              <span>Plaats</span>
+            </button>
+          </div>
+          {activeStoryCategoryNames ? <p className="voice-style-note">Huidig verhaal: {activeStoryCategoryNames}</p> : null}
+          {referenceStoryIds.length ? (
+            <div className="button-row">
+              <p className="voice-style-note reference-count">{referenceStoryIds.length} databaseverhaal als referentie</p>
+              <button type="button" className="quiet" onClick={clearDatabaseReferences}>
+                <Trash2 size={16} />
+                <span>Wis refs</span>
+              </button>
+            </div>
+          ) : null}
+          {visibleLibraryStories.length || (!selectedCategoryId && (localStoryEntries.length || scannedStoryFiles.length)) ? (
             <div className="saved-story-list">
-              {savedStories.map((entry) => (
+              {visibleLibraryStories.map((entry) => (
+                <article
+                  className="saved-story-item library-story-item"
+                  draggable
+                  key={entry.id}
+                  onDragStart={() => setDraggedLibraryStoryId(entry.id)}
+                  onDragEnd={() => setDraggedLibraryStoryId("")}
+                >
+                  <label className="reference-toggle" title="Gebruik dit verhaal als referentie">
+                    <input
+                      type="checkbox"
+                      checked={referenceStoryIds.includes(entry.id)}
+                      onChange={() => void toggleReferenceStory(entry)}
+                    />
+                    <span>Ref</span>
+                  </label>
+                  <button type="button" className="saved-story-open quiet" onClick={() => void openLibraryStory(entry)} title={entry.sourcePath || entry.title}>
+                    <strong>{entry.title}</strong>
+                    <small>
+                      SQL · {formatSavedAt(entry.savedAt)} · {entry.wordCount.toLocaleString("nl-NL")} woorden · {entry.chapterCount} hoofdstukken
+                    </small>
+                    <span>{entry.categories.length ? `${entry.categories.map((category) => category.name).join(", ")} · ${entry.preview}` : entry.preview}</span>
+                  </button>
+                  <button type="button" className="quiet icon-button" onClick={() => void chooseSequelSource(entry.id)} title="Maak vervolg op dit verhaal">
+                    <ArrowRight size={15} />
+                  </button>
+                  <button type="button" className="quiet icon-button" onClick={() => void deleteLibraryStory(entry)} disabled={libraryBusy} title="Verwijder uit SQL">
+                    <Trash2 size={15} />
+                  </button>
+                </article>
+              ))}
+              {!selectedCategoryId ? localStoryEntries.map((entry) => (
                 <article className="saved-story-item" key={entry.id}>
                   <button type="button" className="saved-story-open quiet" onClick={() => openSavedStory(entry)} title={entry.title}>
                     <strong>{entry.title}</strong>
                     <small>
-                      {formatSavedAt(entry.savedAt)} · {entry.wordCount.toLocaleString("nl-NL")} woorden · {entry.chapterCount} hoofdstukken
+                      Browser · {formatSavedAt(entry.savedAt)} · {entry.wordCount.toLocaleString("nl-NL")} woorden · {entry.chapterCount} hoofdstukken
                     </small>
                     <span>{entry.preview}</span>
                   </button>
@@ -1105,8 +1854,8 @@ export function App() {
                     <Trash2 size={15} />
                   </button>
                 </article>
-              ))}
-              {scannedStoryFiles.map((entry) => (
+              )) : null}
+              {!selectedCategoryId ? scannedStoryFiles.map((entry) => (
                 <article className="saved-story-item file-story-item" key={entry.id}>
                   <button type="button" className="saved-story-open quiet" onClick={() => void openProjectFileEntry(entry)} title={entry.filePath}>
                     <strong>{entry.title}</strong>
@@ -1116,12 +1865,16 @@ export function App() {
                     <span>{entry.fileName}</span>
                   </button>
                 </article>
-              ))}
+              )) : null}
             </div>
           ) : (
-            <p className="voice-style-note">Nog geen opgeslagen verhalen. {projectScanStatus}</p>
+            <p className="voice-style-note">Nog geen opgeslagen verhalen. {libraryStatus}; {projectScanStatus}</p>
           )}
-          {savedStories.length || scannedStoryFiles.length ? <p className="voice-style-note">{projectScanStatus}</p> : null}
+          {visibleLibraryStories.length || (!selectedCategoryId && (localStoryEntries.length || scannedStoryFiles.length)) ? (
+            <p className="voice-style-note">
+              {libraryStatus}; {projectScanStatus}
+            </p>
+          ) : null}
         </section>
 
         <section className="tool-panel">
@@ -1156,9 +1909,23 @@ export function App() {
           </label>
 
           <div className="button-row">
+            <label className="field compact-field">
+              <span>Hoofdstukken</span>
+              <select value={chapterTargetCount} onChange={(event) => setChapterTargetCount(Number(event.target.value))}>
+                {[4, 6, 8, 10, 12, 16, 20, 24, 32].map((count) => (
+                  <option value={count} key={count}>
+                    {count}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button type="button" onClick={refreshFromText}>
               <Clipboard size={16} />
               <span>Verdeel</span>
+            </button>
+            <button type="button" className="quiet" onClick={() => void repartitionStoryWithAi()} disabled={chapteringBusy || !rawText.trim()}>
+              {chapteringBusy ? <Loader2 size={16} /> : <Wand2 size={16} />}
+              <span>{chapteringBusy ? "Verdeelt..." : "AI hoofdstukken"}</span>
             </button>
             <button type="button" className="quiet" onClick={() => fileInputRef.current?.click()}>
               <FolderOpen size={16} />
@@ -1173,6 +1940,7 @@ export function App() {
               <span>Wis</span>
             </button>
           </div>
+          <p className="voice-style-note">{chapteringStatus}</p>
         </section>
 
         <section className="tool-panel">
@@ -1180,10 +1948,74 @@ export function App() {
             <FileText size={17} />
             <span>Verhaal maken</span>
           </div>
+          <button type="button" className="quiet" onClick={promptBuilderOpen ? () => setPromptBuilderOpen(false) : openPromptBuilder}>
+            <Sparkles size={16} />
+            <span>{promptBuilderOpen ? "Prompt sluiten" : storyPrompt.trim() ? "Prompt bekijken / aanpassen" : "Prompt maken"}</span>
+          </button>
+          {promptBuilderOpen ? (
+            <div className="context-brief">
+              <label className="field">
+                <span>What are the characters? (name / age / gender)</span>
+                <textarea value={promptCharacters} onChange={(event) => setPromptCharacters(event.target.value)} rows={3} />
+              </label>
+              <label className="field">
+                <span>What is the plot?</span>
+                <textarea value={promptPlot} onChange={(event) => setPromptPlot(event.target.value)} rows={4} />
+              </label>
+              <label className="field">
+                <span>What is the main event to be focused on?</span>
+                <textarea value={promptMainEvent} onChange={(event) => setPromptMainEvent(event.target.value)} rows={3} />
+              </label>
+              <div className="button-row">
+                <button type="button" className="quiet" onClick={updatePromptDraftFromAnswers}>
+                  <RefreshCw size={16} />
+                  <span>Update prompt from answers</span>
+                </button>
+              </div>
+              <label className="field">
+                <span>Editable generated prompt</span>
+                <textarea value={promptDraft} onChange={(event) => setPromptDraft(event.target.value)} rows={8} />
+              </label>
+              <div className="button-row">
+                <button type="button" onClick={saveGuidedPrompt}>
+                  <Save size={16} />
+                  <span>Save prompt</span>
+                </button>
+                <button type="button" className="quiet" onClick={() => setPromptBuilderOpen(false)}>
+                  <Trash2 size={16} />
+                  <span>Close</span>
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {storyPrompt.trim() && !promptBuilderOpen ? (
+            <div className="context-brief">
+              <small>Saved prompt</small>
+              <p>{storyPrompt}</p>
+            </div>
+          ) : null}
           <label className="field">
-            <span>Prompt</span>
-            <textarea value={storyPrompt} onChange={(event) => setStoryPrompt(event.target.value)} rows={5} />
+            <span>Vervolg op</span>
+            <select value={sequelSourceId} onChange={(event) => void chooseSequelSource(event.target.value)} disabled={libraryBusy || !libraryStories.length}>
+              <option value="">Geen vervolgbron</option>
+              {libraryStories.map((entry) => (
+                <option value={entry.id} key={entry.id}>
+                  {entry.title} · {formatSavedAt(entry.savedAt)}
+                </option>
+              ))}
+            </select>
           </label>
+          <div className="button-row">
+            <button type="button" className="quiet" onClick={chooseCurrentStoryAsSequelSource} disabled={!rawText.trim()}>
+              <ArrowRight size={16} />
+              <span>Vervolg huidig</span>
+            </button>
+            <button type="button" className="quiet" onClick={clearSequelSource} disabled={!sequelSourceText}>
+              <Trash2 size={16} />
+              <span>Wis vervolg</span>
+            </button>
+          </div>
+          <p className="voice-style-note">{sequelStatus}</p>
           <label className="field">
             <span>Genre</span>
             <input value={storyGenre} onChange={(event) => setStoryGenre(event.target.value)} />
@@ -1207,6 +2039,10 @@ export function App() {
               <FolderOpen size={16} />
               <span>Referentie</span>
             </button>
+            <button type="button" className="quiet" onClick={() => void saveUploadedReferenceToDatabase()} disabled={libraryBusy || !referenceText.trim()}>
+              {libraryBusy ? <Loader2 size={16} /> : <Save size={16} />}
+              <span>Bewaar ref</span>
+            </button>
             <button
               type="button"
               className="quiet"
@@ -1229,6 +2065,12 @@ export function App() {
             hidden
           />
           <p className="voice-style-note">{referenceStatus}</p>
+          {referenceStoryIds.length ? (
+            <p className="voice-style-note">
+              {referenceStoryIds.length} databaseverhaal geselecteerd als referentie:{" "}
+              {referenceStoryIds.map((id) => referenceStoryProjects[id]?.title).filter(Boolean).join(", ")}
+            </p>
+          ) : null}
           <div className="button-row">
             <label className="field compact-field">
               <span>Pagina's</span>
@@ -1271,16 +2113,19 @@ export function App() {
               <span>AI-bron</span>
               <select value={aiProvider} onChange={(event) => setAiProvider(event.target.value as AiProvider)}>
                 <option value="local">Lokale Ollama</option>
-                <option value="api">DeepSeek API</option>
+                <option value="deepseek">DeepSeek API</option>
+                <option value="grok">Grok API</option>
               </select>
             </label>
             <label className="field compact-field model-field">
-              <span>{aiProvider === "api" ? "DeepSeek model" : "Ollama model"}</span>
+              <span>{aiProviderModelLabel(aiProvider)}</span>
               <select
                 value={selectedAiModel}
                 onChange={(event) => {
-                  if (aiProvider === "api") {
+                  if (normalizedAiProvider === "deepseek") {
                     setSelectedApiModel(event.target.value);
+                  } else if (normalizedAiProvider === "grok") {
+                    setSelectedGrokModel(event.target.value);
                   } else {
                     setSelectedLocalModel(event.target.value);
                   }
@@ -1351,7 +2196,7 @@ export function App() {
             </label>
           </div>
           <p className="voice-style-note">
-            AI: {aiProvider === "api" ? "DeepSeek API" : "Lokale Ollama"} · {activeModelLabel}
+            AI: {aiProviderLabel(aiProvider)} · {activeModelLabel}
           </p>
           <button type="button" onClick={() => void createFilmPlan()} disabled={filmBusy || !rawText.trim()}>
             {filmBusy ? <Loader2 size={16} /> : <Film size={16} />}
@@ -1430,6 +2275,27 @@ export function App() {
               <span>Wis key</span>
             </button>
           </div>
+          <label className="field">
+            <span>Grok API key</span>
+            <input
+              type="password"
+              value={xaiApiKeyInput}
+              onChange={(event) => setXaiApiKeyInput(event.target.value)}
+              placeholder={apiHealth?.xaiApi?.configured ? "opgeslagen" : "xai-..."}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <div className="button-row">
+            <button type="button" className="quiet" onClick={() => void saveXaiKey()} disabled={xaiKeyBusy || !xaiApiKeyInput.trim()}>
+              {xaiKeyBusy ? <Loader2 size={16} /> : <Save size={16} />}
+              <span>Grok key opslaan</span>
+            </button>
+            <button type="button" className="quiet" onClick={() => void clearXaiKey()} disabled={xaiKeyBusy || !apiHealth?.xaiApi?.configured}>
+              <Trash2 size={16} />
+              <span>Wis Grok key</span>
+            </button>
+          </div>
           <button type="button" className="quiet" onClick={() => void refreshApiHealth(true)} disabled={apiBusy}>
             {apiBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
             <span>Status</span>
@@ -1438,7 +2304,9 @@ export function App() {
             <span>{apiStatus}</span>
             <small>
               {apiHealth?.tts?.voices?.length ?? 0} Piper-stemmen, snel {apiHealth?.context?.model || "onbekend"}, diep{" "}
-              {apiHealth?.context?.deepModel || "onbekend"}, API {apiHealth?.deepseekApi?.configured ? apiHealth.deepseekApi.storyModel : "geen key"},{" "}
+              {apiHealth?.context?.deepModel || "onbekend"}, DeepSeek {apiHealth?.deepseekApi?.configured ? apiHealth.deepseekApi.storyModel : "geen key"}, Grok{" "}
+              {apiHealth?.xaiApi?.configured ? apiHealth.xaiApi.filmModel : "geen key"}, Grok beeld{" "}
+              {apiHealth?.xaiApi?.configured ? apiHealth.xaiApi.imageModel || "standaard" : "geen key"},{" "}
               {apiHealth?.storage?.audioFiles ?? 0} audiofiles, {apiHealth?.storage?.imageFiles ?? 0} beelden
             </small>
             <small>{modelCatalogStatus}</small>
@@ -1524,13 +2392,42 @@ export function App() {
               ))}
             </select>
           </label>
+          <div className="button-row">
+            <label className="field compact-field">
+              <span>Beeldmaker</span>
+              <select value={imageProvider} onChange={(event) => setImageProvider(event.target.value as ImageProvider)}>
+                <option value="comfy">ComfyUI lokaal</option>
+                <option value="grok">Grok Imagine</option>
+              </select>
+            </label>
+            {imageProvider === "grok" ? (
+              <label className="field compact-field model-field">
+                <span>Grok beeldmodel</span>
+                <select
+                  value={selectedGrokImageModel}
+                  onChange={(event) => setSelectedGrokImageModel(event.target.value)}
+                  disabled={!grokImageModelOptions.length && !selectedGrokImageModel}
+                >
+                  {grokImageModelOptions.length ? (
+                    grokImageModelOptions.map((model) => (
+                      <option value={model.id} key={model.id}>
+                        {model.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">Geen beeldmodellen gevonden</option>
+                  )}
+                </select>
+              </label>
+            ) : null}
+          </div>
           <button type="button" className="quiet" onClick={() => void runDeepSeekContextAnalysis("fast")} disabled={contextBusy || !rawText.trim()}>
             {contextBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
             <span>{contextBusy ? "Analyseert..." : "Snelle context"}</span>
           </button>
           <button type="button" className="quiet" onClick={() => void runDeepSeekContextAnalysis("deep")} disabled={contextBusy || !rawText.trim()}>
             {contextBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
-            <span>{aiProvider === "api" ? "Diepe context API" : "Diepe context"}</span>
+            <span>{normalizeAiProvider(aiProvider) === "local" ? "Diepe context" : "Diepe context API"}</span>
           </button>
           <p className="voice-style-note">{contextStatus}</p>
           <label className="field">
@@ -1725,6 +2622,57 @@ export function App() {
   );
 }
 
+function normalizeAiProvider(provider: AiProvider): "local" | "deepseek" | "grok" {
+  if (provider === "api" || provider === "deepseek") return "deepseek";
+  if (provider === "grok") return "grok";
+  return "local";
+}
+
+function aiProviderLabel(provider: AiProvider): string {
+  const normalized = normalizeAiProvider(provider);
+  if (normalized === "deepseek") return "DeepSeek API";
+  if (normalized === "grok") return "Grok API";
+  return "Lokale Ollama";
+}
+
+function aiProviderModelLabel(provider: AiProvider): string {
+  const normalized = normalizeAiProvider(provider);
+  if (normalized === "deepseek") return "DeepSeek model";
+  if (normalized === "grok") return "Grok model";
+  return "Ollama model";
+}
+
+function responseProviderLabel(provider: string): string {
+  if (provider === "deepseek-api") return "DeepSeek API";
+  if (provider === "xai-api") return "Grok API";
+  if (provider === "ollama") return "lokaal";
+  return "fallback";
+}
+
+function imageProviderLabel(provider: ImageProvider): string {
+  return provider === "grok" ? "Grok Imagine" : "ComfyUI";
+}
+
+function buildGuidedStoryPrompt(characters: string, plot: string, mainEvent: string): StoryPromptMeta {
+  const cleanCharacters = characters.trim();
+  const cleanPlot = plot.trim();
+  const cleanMainEvent = mainEvent.trim();
+  const prompt = [
+    "Write a complete, emotionally coherent personal story based on this brief.",
+    `Characters (name / age / gender): ${cleanCharacters || "not specified"}.`,
+    `Plot: ${cleanPlot || "not specified"}.`,
+    `Main event to focus on: ${cleanMainEvent || "not specified"}.`,
+    "Keep the characters consistent, make the scenes concrete, and build the story around the main event without rushing past it.",
+  ].join("\n");
+  return {
+    characters: cleanCharacters,
+    plot: cleanPlot,
+    mainEvent: cleanMainEvent,
+    prompt,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 function withSelectedModel(options: ModelOption[], selectedId: string): ModelOption[] {
   const normalized = options.filter((model) => model.id);
   if (!selectedId || normalized.some((model) => model.id === selectedId)) {
@@ -1846,6 +2794,7 @@ function lightweightProject(project: BookProject, savedAt: string): BookProject 
       : undefined,
     contextAnalysis: project.contextAnalysis,
     filmPlan: project.filmPlan,
+    storyPrompt: project.storyPrompt,
   };
 }
 

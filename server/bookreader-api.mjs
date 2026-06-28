@@ -16,6 +16,9 @@ const OUTPUT_DIR = resolve(process.env.BOOKREADER_OUTPUT_DIR || join(PROJECT_ROO
 const AUDIO_DIR = join(OUTPUT_DIR, "audio");
 const IMAGES_DIR = join(OUTPUT_DIR, "images");
 const PROJECTS_DIR = resolve(process.env.BOOKREADER_PROJECTS_DIR || join(OUTPUT_DIR, "projects"));
+const SQLITE_DB = resolve(process.env.BOOKREADER_SQLITE_DB || join(OUTPUT_DIR, "bookreader.sqlite"));
+const SQLITE_TOOL = join(PROJECT_ROOT, "scripts/bookreader_sqlite.py");
+const PYTHON_BIN = process.env.BOOKREADER_PYTHON_BIN || "python3";
 const VOICES_DIR = resolve(process.env.BOOKREADER_PIPER_VOICES_DIR || join(OUTPUT_DIR, "voices"));
 const PIPER_BIN = process.env.BOOKREADER_PIPER_BIN || autoPiperBinary();
 const PIPER_MODEL = process.env.BOOKREADER_PIPER_MODEL || "";
@@ -31,11 +34,28 @@ let DEEPSEEK_API_KEY = process.env.BOOKREADER_DEEPSEEK_API_KEY || "";
 const DEEPSEEK_API_BASE_URL = normalizeBaseUrl(process.env.BOOKREADER_DEEPSEEK_API_BASE_URL || "https://api.deepseek.com");
 const DEEPSEEK_API_CONTEXT_MODEL = process.env.BOOKREADER_DEEPSEEK_API_CONTEXT_MODEL || "deepseek-v4-flash";
 const DEEPSEEK_API_STORY_MODEL = process.env.BOOKREADER_DEEPSEEK_API_STORY_MODEL || "deepseek-v4-flash";
+const DEEPSEEK_API_FILM_MODEL = process.env.BOOKREADER_DEEPSEEK_API_FILM_MODEL || DEEPSEEK_API_STORY_MODEL;
 const DEEPSEEK_API_MODEL_OPTIONS = [
   { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
   { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
   { id: "deepseek-chat", label: "DeepSeek Chat (legacy)" },
   { id: "deepseek-reasoner", label: "DeepSeek Reasoner (legacy)" },
+];
+let XAI_API_KEY = process.env.BOOKREADER_XAI_API_KEY || process.env.XAI_API_KEY || "";
+const XAI_API_BASE_URL = normalizeBaseUrl(process.env.BOOKREADER_XAI_API_BASE_URL || "https://api.x.ai");
+const XAI_API_CONTEXT_MODEL = process.env.BOOKREADER_XAI_API_CONTEXT_MODEL || "grok-4.3";
+const XAI_API_STORY_MODEL = process.env.BOOKREADER_XAI_API_STORY_MODEL || "grok-4.3";
+const XAI_API_FILM_MODEL = process.env.BOOKREADER_XAI_API_FILM_MODEL || XAI_API_STORY_MODEL;
+const XAI_API_IMAGE_MODEL = process.env.BOOKREADER_XAI_API_IMAGE_MODEL || "grok-imagine-image-quality";
+const XAI_IMAGE_PROMPT_MAX_CHARS = Number(process.env.BOOKREADER_XAI_IMAGE_PROMPT_MAX_CHARS || 1400);
+const XAI_API_MODEL_OPTIONS = [
+  { id: "grok-4.3", label: "Grok 4.3" },
+  { id: "grok-4.20", label: "Grok 4.20" },
+  { id: "grok-build-0.1", label: "Grok Build 0.1" },
+];
+const XAI_API_IMAGE_MODEL_OPTIONS = [
+  { id: "grok-imagine-image-quality", label: "Grok Imagine Image Quality" },
+  { id: "grok-imagine-image", label: "Grok Imagine Image" },
 ];
 const MAX_CONTEXT_CHARS = Number(process.env.BOOKREADER_CONTEXT_MAX_CHARS || 18000);
 const REFERENCE_MAX_CHARS = Number(process.env.BOOKREADER_REFERENCE_MAX_CHARS || 60000);
@@ -308,6 +328,46 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/library/list") {
+      await handleLibraryList(res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/api/library/open/")) {
+      await handleLibraryOpen(url, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/save") {
+      await handleLibrarySave(req, res);
+      return;
+    }
+
+    if (req.method === "DELETE" && url.pathname.startsWith("/api/library/delete/")) {
+      await handleLibraryDelete(url, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/import-json") {
+      await handleLibraryImportJson(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/library/categories") {
+      await handleLibraryCategories(res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/categories") {
+      await handleLibraryCategoryCreate(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/library/categories/assign") {
+      await handleLibraryCategoryAssign(req, res);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/tts/synthesize") {
       await handleTts(req, res);
       return;
@@ -328,6 +388,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/story/rechapter") {
+      await handleStoryRechapter(req, res);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/film/plan") {
       await handleFilmPlan(req, res);
       return;
@@ -335,6 +400,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/api/settings/deepseek-key") {
       await handleDeepSeekKeySave(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/settings/xai-key") {
+      await handleXaiKeySave(req, res);
       return;
     }
 
@@ -423,9 +493,20 @@ function healthPayload() {
       baseUrl: DEEPSEEK_API_BASE_URL,
       contextModel: DEEPSEEK_API_CONTEXT_MODEL,
       storyModel: DEEPSEEK_API_STORY_MODEL,
+      filmModel: DEEPSEEK_API_FILM_MODEL,
+    },
+    xaiApi: {
+      configured: Boolean(XAI_API_KEY),
+      baseUrl: XAI_API_BASE_URL,
+      contextModel: XAI_API_CONTEXT_MODEL,
+      storyModel: XAI_API_STORY_MODEL,
+      filmModel: XAI_API_FILM_MODEL,
+      imageModel: XAI_API_IMAGE_MODEL,
     },
     storage: {
       outputDir: OUTPUT_DIR,
+      sqliteDb: SQLITE_DB,
+      sqliteAvailable: existsSync(SQLITE_TOOL),
       audioFiles: safeAudioCount(),
       imageFiles: safeImageCount(),
     },
@@ -433,11 +514,18 @@ function healthPayload() {
 }
 
 async function modelCatalogPayload() {
-  const [ollama, deepseekApi] = await Promise.all([ollamaModelCatalog(), deepSeekApiModelCatalog()]);
+  const [ollama, deepseekApi, xaiApi, xaiImageApi] = await Promise.all([
+    ollamaModelCatalog(),
+    deepSeekApiModelCatalog(),
+    xaiApiModelCatalog(),
+    xaiImageApiModelCatalog(),
+  ]);
   return {
     ok: true,
     ollama,
     deepseekApi,
+    xaiApi,
+    xaiImageApi,
     defaults: {
       local: {
         fastContext: CONTEXT_MODEL,
@@ -448,6 +536,13 @@ async function modelCatalogPayload() {
       api: {
         context: DEEPSEEK_API_CONTEXT_MODEL,
         story: DEEPSEEK_API_STORY_MODEL,
+        film: DEEPSEEK_API_FILM_MODEL,
+      },
+      xai: {
+        context: XAI_API_CONTEXT_MODEL,
+        story: XAI_API_STORY_MODEL,
+        film: XAI_API_FILM_MODEL,
+        image: XAI_API_IMAGE_MODEL,
       },
     },
   };
@@ -544,6 +639,100 @@ async function deepSeekApiModelCatalog() {
   }
 }
 
+async function xaiApiModelCatalog() {
+  const fallbackModels = normalizeModelOptions(XAI_API_MODEL_OPTIONS);
+  if (!XAI_API_KEY) {
+    return {
+      configured: false,
+      baseUrl: XAI_API_BASE_URL,
+      models: fallbackModels,
+    };
+  }
+
+  try {
+    const response = await fetch(apiUrl(XAI_API_BASE_URL, "/v1/models"), {
+      headers: {
+        Authorization: `Bearer ${XAI_API_KEY}`,
+      },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        configured: true,
+        baseUrl: XAI_API_BASE_URL,
+        models: fallbackModels,
+        error: `xai_models_http_${response.status}`,
+      };
+    }
+
+    const liveModels = Array.isArray(payload.data)
+      ? payload.data.map((item) => ({
+          id: String(item.id || "").trim(),
+          label: String(item.id || "").trim(),
+        }))
+      : [];
+    return {
+      configured: true,
+      baseUrl: XAI_API_BASE_URL,
+      models: mergeModelOptions(fallbackModels, liveModels),
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      baseUrl: XAI_API_BASE_URL,
+      models: fallbackModels,
+      error: error instanceof Error && error.message ? error.message : "xai_models_unreachable",
+    };
+  }
+}
+
+async function xaiImageApiModelCatalog() {
+  const fallbackModels = normalizeModelOptions(XAI_API_IMAGE_MODEL_OPTIONS);
+  if (!XAI_API_KEY) {
+    return {
+      configured: false,
+      baseUrl: XAI_API_BASE_URL,
+      models: fallbackModels,
+    };
+  }
+
+  try {
+    const response = await fetch(apiUrl(XAI_API_BASE_URL, "/v1/image-generation-models"), {
+      headers: {
+        Authorization: `Bearer ${XAI_API_KEY}`,
+      },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        configured: true,
+        baseUrl: XAI_API_BASE_URL,
+        models: fallbackModels,
+        error: `xai_image_models_http_${response.status}`,
+      };
+    }
+
+    const liveModels = Array.isArray(payload.data)
+      ? payload.data.map((item) => ({
+          id: String(item.id || "").trim(),
+          label: String(item.id || "").trim(),
+        }))
+      : [];
+    return {
+      configured: true,
+      baseUrl: XAI_API_BASE_URL,
+      models: mergeModelOptions(fallbackModels, liveModels),
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      baseUrl: XAI_API_BASE_URL,
+      models: fallbackModels,
+      error: error instanceof Error && error.message ? error.message : "xai_image_models_unreachable",
+    };
+  }
+}
+
 function mergeModelOptions(primary, secondary) {
   return normalizeModelOptions([...primary, ...secondary]);
 }
@@ -572,6 +761,32 @@ function sanitizeModelName(value) {
 
 function selectRequestModel(requestedModel, fallbackModel) {
   return sanitizeModelName(requestedModel) || fallbackModel;
+}
+
+function normalizeAiProvider(value) {
+  const provider = String(value || "").trim().toLowerCase();
+  if (provider === "grok" || provider === "xai" || provider === "xai-api") return "grok";
+  if (provider === "api" || provider === "deepseek" || provider === "deepseek-api") return "deepseek";
+  return "local";
+}
+
+function apiDefaultModel(provider, purpose) {
+  if (provider === "grok") {
+    if (purpose === "context") return XAI_API_CONTEXT_MODEL;
+    if (purpose === "film") return XAI_API_FILM_MODEL;
+    return XAI_API_STORY_MODEL;
+  }
+  if (purpose === "context") return DEEPSEEK_API_CONTEXT_MODEL;
+  if (purpose === "film") return DEEPSEEK_API_FILM_MODEL;
+  return DEEPSEEK_API_STORY_MODEL;
+}
+
+function apiProviderLabel(provider) {
+  return provider === "grok" ? "Grok API" : "DeepSeek API";
+}
+
+function apiResponseProvider(provider) {
+  return provider === "grok" ? "xai-api" : "deepseek-api";
 }
 
 async function handleProjectList(res) {
@@ -611,6 +826,87 @@ async function handleProjectOpen(url, res) {
     filePath,
     project: record.project,
   });
+}
+
+async function handleLibraryList(res) {
+  const payload = await runSqliteTool(["list", "--db", SQLITE_DB]);
+  await sendJson(res, 200, payload);
+}
+
+async function handleLibraryOpen(url, res) {
+  const id = decodeURIComponent(url.pathname.replace("/api/library/open/", ""));
+  const payload = await runSqliteTool(["open", "--db", SQLITE_DB, "--id", id]);
+  if (!payload.ok) {
+    await sendJson(res, 404, payload);
+    return;
+  }
+  await sendJson(res, 200, payload);
+}
+
+async function handleLibrarySave(req, res) {
+  const body = await readJson(req);
+  if (!isBookReaderProject(body.project)) {
+    await sendJson(res, 400, { ok: false, error: "invalid_project" });
+    return;
+  }
+
+  const payload = await runSqliteTool(
+    ["save", "--db", SQLITE_DB],
+    JSON.stringify({
+      project: normalizeBookReaderProject(body.project, new Date().toISOString()),
+      categoryIds: Array.isArray(body.categoryIds) ? body.categoryIds.map((item) => String(item || "").trim()).filter(Boolean) : [],
+      sourcePath: typeof body.sourcePath === "string" ? body.sourcePath : undefined,
+      fileName: typeof body.fileName === "string" ? body.fileName : undefined,
+    }),
+  );
+  await sendJson(res, payload.ok ? 200 : 400, payload);
+}
+
+async function handleLibraryDelete(url, res) {
+  const id = decodeURIComponent(url.pathname.replace("/api/library/delete/", ""));
+  const payload = await runSqliteTool(["delete", "--db", SQLITE_DB, "--id", id]);
+  await sendJson(res, payload.ok ? 200 : 404, payload);
+}
+
+async function handleLibraryImportJson(req, res) {
+  const body = await readJson(req);
+  const bodyPaths = Array.isArray(body.paths) ? body.paths.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  const paths = bodyPaths.length ? bodyPaths : projectSearchDirs();
+  const args = ["import", "--db", SQLITE_DB];
+  for (const dirPath of paths) args.push("--path", dirPath);
+  const payload = await runSqliteTool(args);
+  await sendJson(res, payload.ok ? 200 : 400, {
+    ...payload,
+    scannedDirs: paths,
+  });
+}
+
+async function handleLibraryCategories(res) {
+  const payload = await runSqliteTool(["categories", "--db", SQLITE_DB]);
+  await sendJson(res, 200, payload);
+}
+
+async function handleLibraryCategoryCreate(req, res) {
+  const body = await readJson(req);
+  const name = String(body.name || "").trim();
+  if (!name) {
+    await sendJson(res, 400, { ok: false, error: "empty_category_name" });
+    return;
+  }
+  const payload = await runSqliteTool(["create-category", "--db", SQLITE_DB, "--name", name]);
+  await sendJson(res, 200, payload);
+}
+
+async function handleLibraryCategoryAssign(req, res) {
+  const body = await readJson(req);
+  const projectId = String(body.projectId || "").trim();
+  const categoryId = String(body.categoryId || "").trim();
+  if (!projectId || !categoryId) {
+    await sendJson(res, 400, { ok: false, error: "missing_category_assignment" });
+    return;
+  }
+  const payload = await runSqliteTool(["assign-category", "--db", SQLITE_DB, "--project-id", projectId, "--category-id", categoryId]);
+  await sendJson(res, payload.ok ? 200 : 404, payload);
 }
 
 function projectSearchDirs() {
@@ -707,6 +1003,7 @@ function normalizeBookReaderProject(project, fallbackSavedAt) {
     bookCover: project.bookCover && typeof project.bookCover === "object" ? project.bookCover : undefined,
     contextAnalysis: project.contextAnalysis,
     filmPlan: project.filmPlan,
+    storyPrompt: project.storyPrompt && typeof project.storyPrompt === "object" ? project.storyPrompt : undefined,
   };
 }
 
@@ -764,12 +1061,13 @@ async function handleContextAnalyze(req, res) {
   const chapterText = String(body.chapterText || "");
   const style = String(body.style || "storybook");
   const mode = body.mode === "deep" ? "deep" : "fast";
-  const provider = body.provider === "api" ? "api" : "local";
+  const provider = normalizeAiProvider(body.provider);
   const localModel = mode === "deep" ? DEEP_CONTEXT_MODEL : CONTEXT_MODEL;
-  const defaultModel = provider === "api" ? DEEPSEEK_API_CONTEXT_MODEL : localModel;
+  const defaultModel = provider === "local" ? localModel : apiDefaultModel(provider, "context");
   const model = selectRequestModel(body.model, defaultModel);
   const timeoutMs = mode === "deep" ? DEEP_CONTEXT_TIMEOUT_MS : CONTEXT_TIMEOUT_MS;
   const maxContextChars = mode === "deep" ? Math.max(MAX_CONTEXT_CHARS, 36000) : MAX_CONTEXT_CHARS;
+  const providerLabel = provider === "local" ? "DeepSeek" : apiProviderLabel(provider);
 
   if (!rawText.trim() && !chapterText.trim()) {
     await sendJson(res, 400, { ok: false, error: "empty_text" });
@@ -792,8 +1090,9 @@ async function handleContextAnalyze(req, res) {
     fallbackAnalysis,
   });
 
-  if (provider === "api") {
+  if (provider !== "local") {
     const apiResult = await runDeepSeekApiChat({
+      apiProvider: provider,
       res,
       model,
       messages: [
@@ -808,9 +1107,9 @@ async function handleContextAnalyze(req, res) {
       responseFormat: { type: "json_object" },
       timeoutMs,
       timeoutError: "context_model_timeout",
-      timeoutMessage: `DeepSeek API-contextanalyse duurde langer dan ${timeoutMs} ms. Probeer een korter hoofdstuk of het snelle model.`,
+      timeoutMessage: `${providerLabel}-contextanalyse duurde langer dan ${timeoutMs} ms. Probeer een korter hoofdstuk of het snelle model.`,
       unreachableError: "context_model_unreachable",
-      unreachableMessage: "DeepSeek API kon niet worden bereikt voor contextanalyse.",
+      unreachableMessage: `${providerLabel} kon niet worden bereikt voor contextanalyse.`,
       failureError: "context_model_failed",
     });
     if (apiResult.clientClosed) return;
@@ -823,12 +1122,12 @@ async function handleContextAnalyze(req, res) {
     if (!parsed) {
       await sendJson(res, 200, {
         ok: true,
-        provider: "deepseek-api",
+        provider: apiResponseProvider(provider),
         model,
         mode,
         fallbackUsed: true,
         fallbackReasons: ["context_json_parse_failed"],
-        warning: "DeepSeek API gaf geen geldige JSON terug; lokale contextfallback gebruikt.",
+        warning: `${providerLabel} gaf geen geldige JSON terug; lokale contextfallback gebruikt.`,
         analysis: fallbackAnalysis,
         preview: String(apiResult.content || "").slice(0, 1200),
       });
@@ -838,7 +1137,7 @@ async function handleContextAnalyze(req, res) {
     const merged = mergeContextAnalysis(normalizeContextAnalysis(parsed), fallbackAnalysis);
     await sendJson(res, 200, {
       ok: true,
-      provider: "deepseek-api",
+      provider: apiResponseProvider(provider),
       model,
       mode,
       fallbackUsed: merged.fallbackUsed,
@@ -937,12 +1236,13 @@ async function handleStoryGenerate(req, res) {
   const body = await readJson(req);
   const prompt = String(body.prompt || "").trim();
   const mode = body.mode === "deep" ? "deep" : "fast";
-  const provider = body.provider === "api" ? "api" : "local";
+  const provider = normalizeAiProvider(body.provider);
   const narrativePreset = body.narrativePreset === "rich_intro" ? "rich_intro" : "balanced";
   const localModel = mode === "deep" ? DEEP_STORY_MODEL : STORY_MODEL;
-  const defaultModel = provider === "api" ? DEEPSEEK_API_STORY_MODEL : localModel;
+  const defaultModel = provider === "local" ? localModel : apiDefaultModel(provider, "story");
   const model = selectRequestModel(body.model, defaultModel);
   const timeoutMs = mode === "deep" ? DEEP_STORY_TIMEOUT_MS : STORY_TIMEOUT_MS;
+  const providerLabel = provider === "local" ? "DeepSeek" : apiProviderLabel(provider);
   const pages = clampNumber(Number(body.pages || (narrativePreset === "rich_intro" ? 6 : 4)), narrativePreset === "rich_intro" ? 4 : 1, mode === "deep" ? 24 : 12);
   const wordsPerPage = clampNumber(Number(body.wordsPerPage || (narrativePreset === "rich_intro" ? 750 : 550)), narrativePreset === "rich_intro" ? 650 : 180, 1000);
   const genre = String(body.genre || "avontuurlijk verhaal").slice(0, 160);
@@ -954,6 +1254,9 @@ async function handleStoryGenerate(req, res) {
   const referenceTitle = String(body.referenceTitle || "").slice(0, 220);
   const referenceText = normalizeText(body.referenceText || "").slice(0, REFERENCE_MAX_CHARS);
   const referenceGuide = buildReferenceGuide({ referenceTitle, referenceText, language });
+  const sequelOfTitle = String(body.sequelOfTitle || "").slice(0, 220);
+  const sequelOfText = normalizeText(body.sequelOfText || "").slice(0, REFERENCE_MAX_CHARS);
+  const sequelGuide = buildReferenceGuide({ referenceTitle: sequelOfTitle, referenceText: sequelOfText, language });
 
   if (!prompt) {
     await sendJson(res, 400, { ok: false, error: "empty_prompt" });
@@ -974,10 +1277,14 @@ async function handleStoryGenerate(req, res) {
     narrativePreset,
     referenceGuide,
     referenceText,
+    sequelOfTitle,
+    sequelOfText,
+    sequelGuide,
   });
 
-  if (provider === "api") {
+  if (provider !== "local") {
     const apiResult = await runDeepSeekApiChat({
+      apiProvider: provider,
       res,
       model,
       messages: [
@@ -991,9 +1298,9 @@ async function handleStoryGenerate(req, res) {
       maxTokens: Math.min(64000, Math.max(mode === "deep" ? 2800 : 1400, Math.round(targetWords * 2.25))),
       timeoutMs,
       timeoutError: "story_model_timeout",
-      timeoutMessage: `DeepSeek API-verhaalgeneratie duurde langer dan ${timeoutMs} ms. Probeer minder pagina's of het snelle model.`,
+      timeoutMessage: `${providerLabel}-verhaalgeneratie duurde langer dan ${timeoutMs} ms. Probeer minder pagina's of het snelle model.`,
       unreachableError: "story_model_unreachable",
-      unreachableMessage: "DeepSeek API kon niet worden bereikt voor verhaalgeneratie.",
+      unreachableMessage: `${providerLabel} kon niet worden bereikt voor verhaalgeneratie.`,
       failureError: "story_model_failed",
     });
     if (apiResult.clientClosed) return;
@@ -1020,7 +1327,7 @@ async function handleStoryGenerate(req, res) {
         message: quality.message,
         model,
         mode,
-        provider: "deepseek-api",
+        provider: apiResponseProvider(provider),
         quality,
         preview: story.slice(0, 1400),
       });
@@ -1028,7 +1335,7 @@ async function handleStoryGenerate(req, res) {
     }
     await sendJson(res, 200, {
       ok: true,
-      provider: "deepseek-api",
+      provider: apiResponseProvider(provider),
       model,
       mode,
       title,
@@ -1136,16 +1443,158 @@ async function handleStoryGenerate(req, res) {
   });
 }
 
+async function handleStoryRechapter(req, res) {
+  const body = await readJson(req);
+  const title = String(body.title || "Nieuw verhaal").slice(0, 220);
+  const rawText = normalizeText(body.rawText || "");
+  const mode = body.mode === "deep" ? "deep" : "fast";
+  const provider = normalizeAiProvider(body.provider);
+  const localModel = mode === "deep" ? DEEP_STORY_MODEL : STORY_MODEL;
+  const defaultModel = provider === "local" ? localModel : apiDefaultModel(provider, "story");
+  const model = selectRequestModel(body.model, defaultModel);
+  const timeoutMs = mode === "deep" ? DEEP_STORY_TIMEOUT_MS : STORY_TIMEOUT_MS;
+  const requestedLanguage = String(body.language || "Auto").slice(0, 80);
+  const language = resolveStoryLanguage(requestedLanguage, rawText);
+  const chapterLabel = storyChapterLabel(language);
+  const targetChapters = clampNumber(Number(body.targetChapters || estimateChapterCount(rawText) || 8), 2, 40);
+  const sourceText = rawText.slice(0, mode === "deep" ? 90000 : 52000);
+  const providerLabel = provider === "local" ? "DeepSeek" : apiProviderLabel(provider);
+
+  if (!sourceText.trim()) {
+    await sendJson(res, 400, { ok: false, error: "empty_text" });
+    return;
+  }
+
+  const prompt = buildStoryRechapterPrompt({
+    title,
+    rawText: sourceText,
+    targetChapters,
+    language,
+    chapterLabel,
+  });
+  const originalWords = countWords(sourceText);
+
+  if (provider !== "local") {
+    const apiResult = await runDeepSeekApiChat({
+      apiProvider: provider,
+      res,
+      model,
+      messages: [
+        {
+          role: "system",
+          content: "You are BookReader's chapter editor. Return only the re-chaptered Markdown story. Do not include analysis, JSON, notes, or hidden reasoning.",
+        },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.08,
+      maxTokens: Math.min(64000, Math.max(3200, Math.round(originalWords * 1.9))),
+      timeoutMs,
+      timeoutError: "rechapter_model_timeout",
+      timeoutMessage: `${providerLabel}-hoofdstukindeling duurde langer dan ${timeoutMs} ms. Probeer minder tekst of de snelle stand.`,
+      unreachableError: "rechapter_model_unreachable",
+      unreachableMessage: `${providerLabel} kon niet worden bereikt voor hoofdstukindeling.`,
+      failureError: "rechapter_model_failed",
+    });
+    if (apiResult.clientClosed) return;
+    if (!apiResult.ok) {
+      await sendJson(res, apiResult.status, apiResult.payload);
+      return;
+    }
+    await sendRechapterResult(res, {
+      provider: apiResponseProvider(provider),
+      model,
+      mode,
+      title,
+      rawText: sourceText,
+      generatedText: apiResult.content,
+      targetChapters,
+      chapterLabel,
+    });
+    return;
+  }
+
+  const available = await isOllamaModelAvailable(model);
+  if (!available) {
+    await sendJson(res, 503, {
+      ok: false,
+      error: "rechapter_model_not_available",
+      message: `Ollama model ${model} is niet beschikbaar. Run: ollama pull ${model}`,
+      model,
+    });
+    return;
+  }
+
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => abortController.abort(new Error("rechapter_timeout")), timeoutMs);
+  res.on("close", () => {
+    if (!res.writableEnded) abortController.abort(new Error("client_closed"));
+  });
+
+  let response;
+  try {
+    response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        prompt,
+        stream: false,
+        options: {
+          temperature: 0.08,
+          top_p: 0.85,
+          num_ctx: mode === "deep" ? 8192 : 4096,
+          num_predict: Math.min(mode === "deep" ? 16000 : 9000, Math.max(2800, Math.round(originalWords * 1.8))),
+        },
+        keep_alive: "10m",
+      }),
+      signal: abortController.signal,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "client_closed") return;
+    const timedOut = message === "rechapter_timeout" || (error instanceof Error && error.name === "TimeoutError");
+    await sendJson(res, timedOut ? 504 : 502, {
+      ok: false,
+      error: timedOut ? "rechapter_model_timeout" : "rechapter_model_unreachable",
+      message: timedOut
+        ? `Lokale hoofdstukindeling duurde langer dan ${timeoutMs} ms. Probeer minder tekst of een sneller model.`
+        : "Ollama kon niet worden bereikt voor hoofdstukindeling.",
+      model,
+    });
+    return;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    await sendJson(res, response.status, { ok: false, error: "rechapter_model_failed", details: payload });
+    return;
+  }
+
+  await sendRechapterResult(res, {
+    provider: "ollama",
+    model,
+    mode,
+    title,
+    rawText: sourceText,
+    generatedText: String(payload.response || ""),
+    targetChapters,
+    chapterLabel,
+  });
+}
+
 async function handleFilmPlan(req, res) {
   const body = await readJson(req);
   const title = String(body.title || "Untitled").slice(0, 220);
   const rawText = normalizeText(body.rawText || "");
   const mode = body.mode === "deep" ? "deep" : "fast";
-  const provider = body.provider === "api" ? "api" : "local";
+  const provider = normalizeAiProvider(body.provider);
   const localModel = mode === "deep" ? DEEP_STORY_MODEL : STORY_MODEL;
-  const defaultModel = provider === "api" ? DEEPSEEK_API_STORY_MODEL : localModel;
+  const defaultModel = provider === "local" ? localModel : apiDefaultModel(provider, "film");
   const model = selectRequestModel(body.model, defaultModel);
   const timeoutMs = mode === "deep" ? DEEP_FILM_TIMEOUT_MS : FILM_TIMEOUT_MS;
+  const providerLabel = provider === "local" ? "DeepSeek" : apiProviderLabel(provider);
   const targetMinutes = clampNumber(Number(body.targetMinutes || 7), 5, 10);
   const sceneCount = clampNumber(Number(body.sceneCount || targetMinutes * 2), 6, 24);
   const style = String(body.style || "cinematic").slice(0, 120);
@@ -1172,8 +1621,9 @@ async function handleFilmPlan(req, res) {
     fallbackPlan,
   });
 
-  if (provider === "api") {
+  if (provider !== "local") {
     const apiResult = await runDeepSeekApiChat({
+      apiProvider: provider,
       res,
       model,
       messages: [
@@ -1188,9 +1638,9 @@ async function handleFilmPlan(req, res) {
       responseFormat: { type: "json_object" },
       timeoutMs,
       timeoutError: "film_model_timeout",
-      timeoutMessage: `DeepSeek API-filmplan duurde langer dan ${timeoutMs} ms. Probeer minder scènes of het snelle model.`,
+      timeoutMessage: `${providerLabel}-filmplan duurde langer dan ${timeoutMs} ms. Probeer minder scènes of het snelle model.`,
       unreachableError: "film_model_unreachable",
-      unreachableMessage: "DeepSeek API kon niet worden bereikt voor het filmplan.",
+      unreachableMessage: `${providerLabel} kon niet worden bereikt voor het filmplan.`,
       failureError: "film_model_failed",
     });
     if (apiResult.clientClosed) return;
@@ -1203,11 +1653,11 @@ async function handleFilmPlan(req, res) {
     if (!parsed) {
       await sendJson(res, 200, {
         ok: true,
-        provider: "deepseek-api",
+        provider: apiResponseProvider(provider),
         model,
         mode,
         fallbackUsed: true,
-        warning: "DeepSeek API gaf geen geldige JSON terug; lokaal filmplan gebruikt.",
+        warning: `${providerLabel} gaf geen geldige JSON terug; lokaal filmplan gebruikt.`,
         plan: fallbackPlan,
         preview: String(apiResult.content || "").slice(0, 1200),
       });
@@ -1216,7 +1666,7 @@ async function handleFilmPlan(req, res) {
 
     await sendJson(res, 200, {
       ok: true,
-      provider: "deepseek-api",
+      provider: apiResponseProvider(provider),
       model,
       mode,
       fallbackUsed: false,
@@ -1345,6 +1795,44 @@ async function handleDeepSeekKeySave(req, res) {
     ok: true,
     configured: true,
     message: "DeepSeek API key is opgeslagen.",
+  });
+}
+
+async function handleXaiKeySave(req, res) {
+  const body = await readJson(req);
+  const clear = body.clear === true;
+  const apiKey = String(body.apiKey || "").trim();
+
+  if (clear || !apiKey) {
+    writeProjectEnvValue("BOOKREADER_XAI_API_KEY", "");
+    delete process.env.BOOKREADER_XAI_API_KEY;
+    delete process.env.XAI_API_KEY;
+    XAI_API_KEY = "";
+    await sendJson(res, 200, {
+      ok: true,
+      configured: false,
+      message: "Grok API key is gewist.",
+    });
+    return;
+  }
+
+  if (!/^[A-Za-z0-9._-]{12,}$/.test(apiKey) || apiKey.length > 500) {
+    await sendJson(res, 400, {
+      ok: false,
+      error: "invalid_xai_api_key",
+      message: "Controleer de Grok/xAI API key en probeer opnieuw.",
+    });
+    return;
+  }
+
+  writeProjectEnvValue("BOOKREADER_XAI_API_KEY", apiKey);
+  process.env.BOOKREADER_XAI_API_KEY = apiKey;
+  XAI_API_KEY = apiKey;
+
+  await sendJson(res, 200, {
+    ok: true,
+    configured: true,
+    message: "Grok API key is opgeslagen.",
   });
 }
 
@@ -1486,11 +1974,28 @@ async function handleIllustrationGenerate(req, res) {
   const prompt = String(body.prompt || "").trim();
   const negativePrompt = String(body.negativePrompt || "low quality, blurry, text, watermark").trim();
   const seed = Number.isFinite(Number(body.seed)) ? Number(body.seed) : Math.floor(Math.random() * 1_000_000_000);
+  const provider = normalizeImageProvider(body.provider);
+  const kind = slug(String(body.kind || "image")).slice(0, 40) || "image";
+  const label = slug(String(body.label || "")).slice(0, 50);
 
   if (!prompt) {
     await sendJson(res, 400, { ok: false, error: "empty_prompt" });
     return;
   }
+
+  if (provider === "grok") {
+    await handleXaiImageGenerate({
+      res,
+      prompt,
+      negativePrompt,
+      kind,
+      label,
+      model: selectRequestModel(body.model, XAI_API_IMAGE_MODEL),
+      aspectRatio: selectImageAspectRatio(body.aspectRatio, kind),
+    });
+    return;
+  }
+
   if (!COMFY_WORKFLOW || !existsSync(COMFY_WORKFLOW)) {
     await sendJson(res, 503, {
       ok: false,
@@ -1524,6 +2029,163 @@ async function handleIllustrationGenerate(req, res) {
     injectedNodes: injected.injectedNodes,
     status: "queued",
   });
+}
+
+function normalizeImageProvider(value) {
+  const provider = String(value || "").trim().toLowerCase();
+  return provider === "grok" || provider === "xai" || provider === "xai-image" ? "grok" : "comfy";
+}
+
+function selectImageAspectRatio(value, kind) {
+  const requested = String(value || "").trim();
+  const allowed = new Set(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20", "auto"]);
+  if (allowed.has(requested)) return requested;
+  if (kind === "cover") return "2:3";
+  if (kind === "portrait") return "3:4";
+  return "4:3";
+}
+
+async function handleXaiImageGenerate({ res, prompt, negativePrompt, kind, label, model, aspectRatio }) {
+  if (!XAI_API_KEY) {
+    await sendJson(res, 503, {
+      ok: false,
+      error: "xai_api_key_missing",
+      message: "Grok beeldgeneratie is gekozen, maar BOOKREADER_XAI_API_KEY staat niet op de server.",
+      model,
+    });
+    return;
+  }
+
+  const imagePrompt = buildXaiImagePrompt({ prompt, negativePrompt, kind });
+  let response;
+  try {
+    response = await fetch(apiUrl(XAI_API_BASE_URL, "/v1/images/generations"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${XAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        prompt: imagePrompt,
+        n: 1,
+        aspect_ratio: aspectRatio,
+      }),
+    });
+  } catch (error) {
+    await sendJson(res, 502, {
+      ok: false,
+      error: "xai_image_unreachable",
+      message: error instanceof Error ? error.message : "Grok beeldgeneratie kon niet worden bereikt.",
+      model,
+    });
+    return;
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    await sendJson(res, response.status, {
+      ok: false,
+      error: "xai_image_failed",
+      message: "Grok beeldgeneratie gaf een fout terug.",
+      model,
+      details: sanitizeProviderApiError(payload),
+    });
+    return;
+  }
+
+  const image = Array.isArray(payload.data) ? payload.data[0] : null;
+  try {
+    const stored = await storeGeneratedImage({
+      url: String(image?.url || ""),
+      b64Json: String(image?.b64_json || ""),
+      contentType: String(image?.mime_type || "image/jpeg"),
+      kind,
+      label,
+    });
+    await sendJson(res, 200, {
+      ok: true,
+      provider: "xai-image",
+      model,
+      prompt: imagePrompt,
+      revisedPrompt: String(image?.revised_prompt || ""),
+      status: "complete",
+      complete: true,
+      imageUrl: stored.imageUrl,
+      filePath: stored.filePath,
+      bytes: stored.bytes,
+      contentType: stored.contentType,
+    });
+  } catch (error) {
+    await sendJson(res, 502, {
+      ok: false,
+      error: "xai_image_cache_failed",
+      message: error instanceof Error ? error.message : "Grok-afbeelding kon niet lokaal worden opgeslagen.",
+      model,
+    });
+  }
+}
+
+function buildXaiImagePrompt({ prompt, negativePrompt, kind }) {
+  const subject =
+    kind === "cover"
+      ? "Book cover illustration grounded in the actual story."
+      : kind === "portrait"
+        ? "Single character portrait grounded in the actual story description."
+        : "Chapter illustration grounded in one literal scene from the actual story.";
+  const antiOldMaster = [
+    "Do not use Dutch Golden Age painting, Jan Steen, Rembrandt, old master oil painting, tavern scene, caricature, Anton Pieck, nostalgic Dutch village painting, or antique postcard styling.",
+    "Use clean contemporary narrative illustration with stable anatomy, consistent face, natural hands, clear eyes, readable pose, and no melted or distorted features.",
+    "Do not add extra people, unrelated scenery, readable text, watermark, logo, decorative filler, or symbolic collage.",
+  ].join(" ");
+  const avoid = negativePrompt ? `Avoid: ${negativePrompt}.` : "";
+  return truncate([
+    subject,
+    "STRICT STORY LOCK: preserve only the characters, setting, objects, mood, and action described by the prompt.",
+    prompt,
+    antiOldMaster,
+    avoid,
+  ].filter(Boolean).join(" "), XAI_IMAGE_PROMPT_MAX_CHARS);
+}
+
+async function storeGeneratedImage({ url, b64Json, contentType, kind, label }) {
+  let buffer;
+  let safeContentType = String(contentType || "image/png").split(";")[0].trim().toLowerCase();
+  if (b64Json) {
+    buffer = Buffer.from(String(b64Json || "").replace(/\s+/g, ""), "base64");
+  } else if (url?.startsWith("data:")) {
+    const parsed = parseDataImage(url);
+    buffer = parsed.buffer;
+    safeContentType = parsed.contentType;
+  } else if (url) {
+    const absoluteUrl = url.startsWith("/") ? `http://${HOST}:${PORT}${url}` : url;
+    const response = await fetch(absoluteUrl);
+    if (!response.ok) {
+      throw new Error(`Afbeelding kon niet worden opgehaald: HTTP ${response.status}`);
+    }
+    safeContentType = String(response.headers.get("content-type") || safeContentType || "image/png").split(";")[0].trim().toLowerCase();
+    buffer = Buffer.from(await response.arrayBuffer());
+  }
+
+  if (!buffer?.length) {
+    throw new Error("Gegenereerde afbeelding was leeg.");
+  }
+  if (!safeContentType.startsWith("image/")) {
+    throw new Error("De gegenereerde respons was geen afbeelding.");
+  }
+
+  const fileKind = slug(kind).slice(0, 40) || "image";
+  const fileLabel = slug(label).slice(0, 50);
+  const extension = imageExtension(safeContentType);
+  const fileName = `${Date.now()}-${fileKind}${fileLabel ? `-${fileLabel}` : ""}-${randomUUID()}.${extension}`;
+  const filePath = join(IMAGES_DIR, fileName);
+  writeFileSync(filePath, buffer);
+  return {
+    imageUrl: `/api/media/images/${encodeURIComponent(fileName)}`,
+    filePath,
+    bytes: buffer.length,
+    contentType: safeContentType,
+  };
 }
 
 async function handleIllustrationStatus(url, res) {
@@ -1706,6 +2368,7 @@ async function isOllamaModelAvailable(model) {
 }
 
 async function runDeepSeekApiChat({
+  apiProvider = "deepseek",
   res,
   model,
   messages,
@@ -1719,14 +2382,15 @@ async function runDeepSeekApiChat({
   unreachableMessage,
   failureError,
 }) {
-  if (!DEEPSEEK_API_KEY) {
+  const config = apiChatConfig(apiProvider);
+  if (!config.apiKey) {
     return {
       ok: false,
       status: 503,
       payload: {
         ok: false,
-        error: "deepseek_api_key_missing",
-        message: "DeepSeek API is gekozen, maar BOOKREADER_DEEPSEEK_API_KEY staat niet op de server.",
+        error: config.missingError,
+        message: config.missingMessage,
         model,
       },
     };
@@ -1747,17 +2411,17 @@ async function runDeepSeekApiChat({
     max_tokens: maxTokens,
     ...(responseFormat ? { response_format: responseFormat } : {}),
   };
-  if (/^deepseek-v4/i.test(model)) {
+  if (config.id === "deepseek" && /^deepseek-v4/i.test(model)) {
     requestBody.thinking = { type: "disabled" };
   }
 
   let response;
   try {
-    response = await fetch(`${DEEPSEEK_API_BASE_URL}/chat/completions`, {
+    response = await fetch(apiUrl(config.baseUrl, config.chatPath), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
+        Authorization: `Bearer ${config.apiKey}`,
       },
       body: JSON.stringify(requestBody),
       signal: abortController.signal,
@@ -1789,9 +2453,9 @@ async function runDeepSeekApiChat({
       payload: {
         ok: false,
         error: failureError,
-        message: "DeepSeek API gaf een fout terug.",
+        message: `${config.label} gaf een fout terug.`,
         model,
-        details: sanitizeDeepSeekApiError(payload),
+        details: sanitizeProviderApiError(payload),
       },
     };
   }
@@ -1802,7 +2466,30 @@ async function runDeepSeekApiChat({
   };
 }
 
-function sanitizeDeepSeekApiError(payload) {
+function apiChatConfig(provider) {
+  if (provider === "grok") {
+    return {
+      id: "grok",
+      label: "Grok API",
+      apiKey: XAI_API_KEY,
+      baseUrl: XAI_API_BASE_URL,
+      chatPath: "/v1/chat/completions",
+      missingError: "xai_api_key_missing",
+      missingMessage: "Grok API is gekozen, maar BOOKREADER_XAI_API_KEY staat niet op de server.",
+    };
+  }
+  return {
+    id: "deepseek",
+    label: "DeepSeek API",
+    apiKey: DEEPSEEK_API_KEY,
+    baseUrl: DEEPSEEK_API_BASE_URL,
+    chatPath: "/chat/completions",
+    missingError: "deepseek_api_key_missing",
+    missingMessage: "DeepSeek API is gekozen, maar BOOKREADER_DEEPSEEK_API_KEY staat niet op de server.",
+  };
+}
+
+function sanitizeProviderApiError(payload) {
   const error = payload?.error && typeof payload.error === "object" ? payload.error : payload;
   return {
     message: String(error?.message || "").slice(0, 600),
@@ -1997,10 +2684,39 @@ function normalizeFilmScene(scene, fallback, index) {
     dialogue: normalizeStringArray(source.dialogue || base.dialogue).slice(0, 5),
     voiceOver: truncate(source.voiceOver || source.narration || base.voiceOver || "", 600),
     camera: truncate(source.camera || base.camera || "", 360),
-    visualPrompt: truncate(source.visualPrompt || source.videoPrompt || base.visualPrompt || "", 1400),
+    visualPrompt: strengthenFilmVisualPrompt(source.visualPrompt || source.videoPrompt || base.visualPrompt || "", {
+      title,
+      sourceRange: source.sourceRange || base.sourceRange || "",
+      location: source.location || base.location || "",
+      timeOfDay: source.timeOfDay || base.timeOfDay || "",
+      characters: normalizeStringArray(source.characters || base.characters).slice(0, 8),
+      action,
+      camera: source.camera || base.camera || "",
+    }),
     audioPrompt: truncate(source.audioPrompt || base.audioPrompt || "", 600),
     transition: truncate(source.transition || base.transition || "", 120),
   };
+}
+
+function strengthenFilmVisualPrompt(prompt, scene) {
+  const base = normalizeText(prompt);
+  const characters = normalizeStringArray(scene.characters).slice(0, 8);
+  const additions = [
+    "Literal source-accurate story moment, not a poster, not concept art.",
+    scene.sourceRange ? `Source beat: ${toVisualEnglish(scene.sourceRange)}.` : "",
+    scene.location ? `Exact location: ${toVisualEnglish(scene.location)}.` : "",
+    scene.timeOfDay ? `Time of day: ${toVisualEnglish(scene.timeOfDay)}.` : "",
+    characters.length ? `Visible characters only: ${characters.join(", ")}.` : "Do not add visible main characters unless the source scene names or describes them.",
+    scene.action ? `Specific action: ${toVisualEnglish(scene.action)}.` : "",
+    scene.camera ? `Camera: ${toVisualEnglish(scene.camera)}.` : "",
+    "Keep story continuity, faces, clothing hints, objects and mood consistent; no unrelated landscapes, crowds, readable text, logos or watermarks.",
+  ].filter(Boolean);
+  const lower = base.toLowerCase();
+  const output = [
+    base || "Cinematic story scene.",
+    ...additions.filter((item) => !lower.includes(item.slice(0, 32).toLowerCase())),
+  ].join(" ");
+  return truncate(output, 1800);
 }
 
 function balanceFilmSceneDurations(scenes, totalDurationSeconds) {
@@ -2096,10 +2812,14 @@ Direction rules:
 - Split by dramatic beats: setup, inciting incident, complications, midpoint, crisis, climax, resolution.
 - Scenes must add up to about ${targetMinutes * 60} seconds.
 - Use 6 to 24 scenes. Each scene must be filmable as a short clip.
-- visualPrompt must be English and suitable for local Wan/ComfyUI video generation: one action, one place, one camera idea, concrete characters, no readable text.
+- Every scene must be anchored in the source text: sourceRange, location, timeOfDay, characters, action and camera must describe the same literal story beat.
+- visualPrompt must be English and suitable for local Wan/ComfyUI video generation: one action, one exact place, one camera idea, concrete visible characters, key objects, mood, no readable text.
+- visualPrompt must not be a poster, book cover, trailer montage, symbolic collage, generic fantasy landscape, or unrelated pretty scenery.
+- If the text does not support a character, crowd, castle, town, costume, creature, weapon or object, do not add it.
 - Keep the number of visible characters clear. Avoid crowds unless the text requires them.
 - Use voiceOver for narration bridges and dialogue for only important spoken lines.
 - Mention emotional continuity and recurring objects in continuityBible.
+- Prefer specific imageable nouns and verbs over vague style words. Each visualPrompt should still be understandable after copying it alone into a video/image model.
 - Requested visual style: ${style}.
 
 Grounded fallback structure you may improve but must not contradict:
@@ -2164,13 +2884,14 @@ function extractDialogue(text) {
 
 function buildFilmVisualPrompt({ title, sceneTitle, action, location, characters, mood, style }) {
   return [
-    `Cinematic short film scene from "${title || "the story"}": ${toVisualEnglish(sceneTitle)}.`,
-    location ? `Location: ${toVisualEnglish(location)}.` : "",
-    characters.length ? `Visible characters: ${characters.join(", ")}.` : "Visible characters only if clearly described in the source.",
-    action ? `Action beat: ${toVisualEnglish(action)}.` : "",
+    `Literal cinematic short film scene from "${title || "the story"}": ${toVisualEnglish(sceneTitle)}.`,
+    "Source-accurate story moment, not a poster, not a cover, not symbolic concept art.",
+    location ? `Exact location: ${toVisualEnglish(location)}.` : "",
+    characters.length ? `Visible characters only: ${characters.join(", ")}.` : "Visible characters only if clearly described in the source.",
+    action ? `Specific action beat: ${toVisualEnglish(action)}.` : "",
     mood ? `Mood: ${mood}.` : "",
     filmVisualStyle(style),
-    "One continuous shot, coherent anatomy, consistent faces and costumes, no readable text, no watermark, no extra main characters.",
+    "One continuous shot, coherent anatomy, consistent faces and costumes, key objects from the scene, no readable text, no watermark, no extra main characters, no unrelated scenery.",
   ].filter(Boolean).join(" ");
 }
 
@@ -2203,9 +2924,15 @@ function buildStoryGenerationPrompt({
   narrativePreset,
   referenceGuide,
   referenceText,
+  sequelOfTitle,
+  sequelOfText,
+  sequelGuide,
 }) {
   const referenceBlock = referenceGuide
     ? `\nReference story bible:\n${referenceGuide}\n\nReference excerpt for continuity, character history and voice. Use it as background; do not copy passages verbatim unless the user explicitly asks for a rewrite:\n${truncate(referenceText, 9000)}\n`
+    : "";
+  const sequelBlock = sequelGuide
+    ? `\nSequel source story:\n${sequelGuide}\n\nThis new story is a continuation of "${sequelOfTitle || "the selected source story"}". Continue after, or as a direct consequence of, the source story. Preserve established characters, names, relationships, setting, unresolved threads, emotional state, and the ending conditions of the source. Do not retell or summarize the old story as the main output; write the next story. Use this source excerpt for continuity and voice:\n${truncate(sequelOfText, 12000)}\n`
     : "";
   const richIntroRules =
     narrativePreset === "rich_intro"
@@ -2245,16 +2972,118 @@ Story quality rules:
 - Do not sexualize characters. If the idea mentions a child, girl, boy, teenager or young person, keep body descriptions neutral and age-appropriate.
 - Do not add intimate body details, fetish clothing, or strange clothing words when the user did not ask for them.
 - Do not invent a completely different village, mountains, war, royal court, monsters, or other large setting unless the user asks for it.
+- If a sequel source story is provided, this output must be a vervolg/sequel: keep continuity with the selected database story and make the user's prompt the new episode, conflict, or next arc.
 - Keep chapters/pages readable aloud.
 
 Genre: ${genre}
 Audience: ${audience}
 Tone: ${tone}
 ${referenceBlock}
+${sequelBlock}
 
 User idea:
 ${prompt}
 `;
+}
+
+function buildStoryRechapterPrompt({ title, rawText, targetChapters, language, chapterLabel }) {
+  return `You are BookReader's chapter editor.
+Your task is to re-divide an existing story into clear chapters.
+
+Output rules:
+- Return Markdown only.
+- Start with exactly one H1 title: "# ${title || "Nieuw verhaal"}".
+- Use chapter headings like "## ${chapterLabel} 1 - <specific chapter title>" through about ${targetChapters} chapters.
+- Chapter titles must describe what happens in that chapter.
+- Preserve the story's original language: ${language}.
+- Preserve the original story order and meaning.
+- Do not summarize the story.
+- Do not add new scenes, characters, plot events, morals, explanations, notes, or commentary.
+- Do not remove important paragraphs.
+- You may move paragraph breaks and add chapter headings.
+- You may lightly fix obvious broken line breaks, but do not rewrite the prose style.
+- If the text already contains headings, replace them with a cleaner chapter structure.
+
+Story title: ${title}
+Target chapters: ${targetChapters}
+
+Story text:
+${rawText}
+`;
+}
+
+async function sendRechapterResult(res, { provider, model, mode, title, rawText, generatedText, targetChapters, chapterLabel }) {
+  const cleaned = cleanGeneratedStory(generatedText);
+  const extractedTitle = extractStoryTitle(cleaned);
+  const finalTitle = extractedTitle && !isGenericStoryTitle(extractedTitle) ? extractedTitle : title || "Nieuw verhaal";
+  const story = ensureChapteredMarkdown(cleaned, finalTitle, targetChapters, chapterLabel);
+  const originalWords = countWords(rawText);
+  const wordCount = countWords(story);
+  const chapterCount = countStorySectionMarkers(story);
+  const minWords = Math.max(120, Math.round(originalWords * 0.72));
+
+  if (originalWords > 220 && wordCount < minWords) {
+    await sendJson(res, 422, {
+      ok: false,
+      error: "rechapter_too_short",
+      message: "Het model heeft het verhaal waarschijnlijk samengevat in plaats van alleen herverdeeld. Probeer de diepe stand of minder tekst.",
+      provider,
+      model,
+      mode,
+      originalWords,
+      wordCount,
+      preview: story.slice(0, 1400),
+    });
+    return;
+  }
+
+  await sendJson(res, 200, {
+    ok: true,
+    provider,
+    model,
+    mode,
+    title: finalTitle,
+    story,
+    targetChapters,
+    chapterCount,
+    wordCount,
+  });
+}
+
+function ensureChapteredMarkdown(rawStory, title, targetChapters, chapterLabel) {
+  let story = cleanGeneratedStory(rawStory);
+  if (!story.trim()) story = "";
+
+  if (/^#\s+.+$/m.test(story)) {
+    story = story.replace(/^#\s+.+$/m, `# ${title}`);
+  } else {
+    story = `# ${title}\n\n${story}`;
+  }
+
+  if (countStorySectionMarkers(story) >= Math.min(2, targetChapters)) {
+    return story.trim();
+  }
+
+  const body = story.replace(/^#\s+.+\n*/, "").trim();
+  if (!body) return `# ${title}\n\n## ${chapterLabel} 1 - Begin\n\n`;
+  const paragraphs = body.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
+  const units = paragraphs.length >= Math.min(targetChapters, 4) ? paragraphs : splitSentences(body);
+  const target = clampNumber(targetChapters, 2, 40);
+  const perChapter = Math.max(1, Math.ceil(units.length / target));
+  const sections = [];
+
+  for (let index = 0; index < target; index += 1) {
+    const chunk = units.slice(index * perChapter, (index + 1) * perChapter).join(paragraphs.length >= Math.min(targetChapters, 4) ? "\n\n" : " ");
+    if (!chunk.trim()) continue;
+    const sectionTitle = deriveChapterTitle(chunk, chapterLabel, index + 1);
+    sections.push(`## ${chapterLabel} ${index + 1} - ${sectionTitle}\n\n${chunk.trim()}`);
+  }
+
+  return [`# ${title}`, ...sections].join("\n\n").trim();
+}
+
+function countStorySectionMarkers(story) {
+  return (String(story || "").match(/^##\s*(?:hoofdstuk|chapter|pagina|page|seite|página)\s+\d+\b/gim) || []).length;
 }
 
 function cleanGeneratedStory(value) {
@@ -2428,7 +3257,7 @@ function assessStoryQuality(story, { title, pages, requestedWords, language }) {
   return {
     ok: reasons.length === 0,
     message: reasons.length
-      ? `DeepSeek leverde geen bruikbaar verhaal (${reasons.join(", ")}). Probeer 'Diep 7B traag' of minder pagina's.`
+      ? `Het gekozen AI-model leverde geen bruikbaar verhaal (${reasons.join(", ")}). Probeer een diep model of minder pagina's.`
       : "verhaalkwaliteit voldoende",
     reasons,
     wordCount,
@@ -2477,6 +3306,15 @@ function storyPageLabel(language) {
   if (lower.includes("español") || lower.includes("spanish")) return "Página";
   if (lower.includes("français") || lower.includes("french")) return "Page";
   return "Pagina";
+}
+
+function storyChapterLabel(language) {
+  const lower = normalizeText(language).toLowerCase();
+  if (lower.includes("english")) return "Chapter";
+  if (lower.includes("deutsch") || lower.includes("german")) return "Kapitel";
+  if (lower.includes("español") || lower.includes("spanish")) return "Capítulo";
+  if (lower.includes("français") || lower.includes("french")) return "Chapitre";
+  return "Hoofdstuk";
 }
 
 function pageMarkerRegex() {
@@ -2572,8 +3410,11 @@ Rules:
 - Use empty strings or empty arrays for unknown fields; never output schema labels like "kort", "regel 1", "name", or "English prompt".
 - Character descriptions must be supported by the story text. If appearance is unknown, say that it is unknown and keep the portrait neutral.
 - chapterPrompt and coverPrompt must be in English for ComfyUI.
-- chapterPrompt must include a concrete scene, the exact characters present, location, important objects, and what should NOT be added.
-- Do not request abstract art, modern art, nostalgic Dutch-village painting, Anton Pieck/Piek-like scenery, unrelated fantasy villages, or extra people unless the story says so.
+- chapterPrompt must describe one literal moment from the selected chapter, not a poster or montage.
+- chapterPrompt must include exact characters present, supported appearance details, location, time/mood, important objects, and what should NOT be added.
+- coverPrompt must be grounded in the whole story's central image and recurring characters/objects; it may be composed as a cover, but it must not invent a different setting.
+- Do not request abstract art, modern art, Jan Steen, Dutch Golden Age painting, old master oil painting, tavern scenes, nostalgic Dutch-village painting, Anton Pieck/Piek-like scenery, unrelated fantasy villages, or extra people unless the story says so.
+- If appearance, clothing, age, location or object details are unknown, keep them neutral instead of inventing ornate replacements.
 - No readable text, no watermark.
 - Keep every field compact. Do not repeat whole chapters inside descriptions or prompts.
 
@@ -2731,7 +3572,7 @@ function buildHeuristicContextAnalysis({ title, rawText, chapterTitle, chapterTe
     mood: inferMood(selectedText || fullText),
     forbidden: [
       "do not turn this into abstract modern art",
-      "do not use nostalgic Dutch village, Anton Pieck-like or Anton Piek-like scenery unless the story explicitly describes it",
+      "do not use Jan Steen, Dutch Golden Age, old master oil painting, tavern scene, nostalgic Dutch village, Anton Pieck-like or Anton Piek-like scenery unless the story explicitly describes it",
       "do not add unrelated castles, towns, forests, crowds, costumes, animals, weapons, or fantasy elements",
       "do not change the number or identity of visible main characters",
     ],
@@ -2827,7 +3668,7 @@ function anchorPrompts({ chapterPrompt, coverPrompt, sceneBrief, characters, fal
     brief.mustShow.length ? `Must show: ${brief.mustShow.map(toVisualEnglish).join("; ")}.` : "",
     brief.objects.length ? `Important objects: ${brief.objects.map(toVisualEnglish).join(", ")}.` : "",
     characterDetails ? `Character continuity: ${characterDetails}.` : "",
-    "Do not add unrelated scenery, extra named characters, generic fantasy villages, abstract modern art, or nostalgic Anton Pieck/Piek-like Dutch village styling.",
+    "Do not add unrelated scenery, extra named characters, generic fantasy villages, abstract modern art, Jan Steen/Dutch Golden Age/old master oil painting, tavern scenes, or nostalgic Anton Pieck/Piek-like Dutch village styling.",
   ].filter(Boolean).join(" ");
 
   const baseChapterPrompt = chapterPrompt || fallbackAnalysis.chapterPrompt;
@@ -3247,6 +4088,52 @@ function collectComfyImages(entry) {
   return images;
 }
 
+async function runSqliteTool(args, input = "") {
+  if (!existsSync(SQLITE_TOOL)) {
+    throw new Error(`BookReader SQLite helper ontbreekt: ${SQLITE_TOOL}`);
+  }
+
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(PYTHON_BIN, [SQLITE_TOOL, ...args], {
+      cwd: PROJECT_ROOT,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", (error) => rejectPromise(error));
+    child.on("close", (code) => {
+      const out = Buffer.concat(stdout).toString("utf8").trim();
+      const err = Buffer.concat(stderr).toString("utf8").trim();
+      if (code !== 0) {
+        const parsedError = parseJsonObject(err) || parseJsonObject(out);
+        rejectPromise(new Error(parsedError?.message || err || `SQLite helper stopte met code ${code}`));
+        return;
+      }
+      const payload = parseJsonObject(out);
+      if (!payload) {
+        rejectPromise(new Error("SQLite helper gaf geen geldige JSON terug."));
+        return;
+      }
+      resolvePromise(payload);
+    });
+
+    if (input) child.stdin.write(input);
+    child.stdin.end();
+  });
+}
+
+function parseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(String(value || ""));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 async function readJson(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -3266,12 +4153,21 @@ async function sendJson(res, status, payload) {
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", process.env.BOOKREADER_CORS_ORIGIN || "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
 function normalizeBaseUrl(value) {
-  return value.replace(/\/+$/, "");
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function apiUrl(baseUrl, path) {
+  const base = normalizeBaseUrl(baseUrl);
+  const suffix = String(path || "").startsWith("/") ? String(path || "") : `/${path || ""}`;
+  if (base.endsWith("/v1") && suffix.startsWith("/v1/")) {
+    return `${base}${suffix.slice(3)}`;
+  }
+  return `${base}${suffix}`;
 }
 
 function loadProjectEnv(projectRoot) {

@@ -48,15 +48,26 @@ export type ApiHealth = {
     baseUrl: string;
     contextModel: string;
     storyModel: string;
+    filmModel?: string;
+  };
+  xaiApi?: {
+    configured: boolean;
+    baseUrl: string;
+    contextModel: string;
+    storyModel: string;
+    filmModel: string;
+    imageModel?: string;
   };
   storage?: {
     outputDir: string;
+    sqliteDb?: string;
+    sqliteAvailable?: boolean;
     audioFiles: number;
     imageFiles?: number;
   };
 };
 
-export type AiProvider = "local" | "api";
+export type AiProvider = "local" | "api" | "deepseek" | "grok";
 
 export type ModelOption = {
   id: string;
@@ -79,6 +90,18 @@ export type ModelCatalogResponse = {
     models: ModelOption[];
     error?: string;
   };
+  xaiApi: {
+    configured: boolean;
+    baseUrl: string;
+    models: ModelOption[];
+    error?: string;
+  };
+  xaiImageApi: {
+    configured: boolean;
+    baseUrl: string;
+    models: ModelOption[];
+    error?: string;
+  };
   defaults: {
     local: {
       fastContext: string;
@@ -89,6 +112,13 @@ export type ModelCatalogResponse = {
     api: {
       context: string;
       story: string;
+      film?: string;
+    };
+    xai: {
+      context: string;
+      story: string;
+      film: string;
+      image: string;
     };
   };
 };
@@ -107,6 +137,8 @@ export type StoryGenerateRequest = {
   narrativePreset?: "balanced" | "rich_intro";
   referenceTitle?: string;
   referenceText?: string;
+  sequelOfTitle?: string;
+  sequelOfText?: string;
 };
 
 export type StoryGenerateResponse = {
@@ -120,6 +152,29 @@ export type StoryGenerateResponse = {
   requestedWords: number;
   language?: string;
   wordCount: number;
+};
+
+export type StoryRechapterRequest = {
+  title: string;
+  rawText: string;
+  targetChapters?: number;
+  language?: string;
+  mode?: "fast" | "deep";
+  provider?: AiProvider;
+  model?: string;
+};
+
+export type StoryRechapterResponse = {
+  ok: boolean;
+  provider: string;
+  model: string;
+  mode: "fast" | "deep";
+  title: string;
+  story: string;
+  targetChapters: number;
+  chapterCount: number;
+  wordCount: number;
+  warning?: string;
 };
 
 export type FilmPlanScene = {
@@ -198,18 +253,33 @@ export type IllustrationRequest = {
   prompt: string;
   negativePrompt: string;
   seed?: number;
+  provider?: ImageProvider;
+  model?: string;
+  kind?: "chapter" | "cover" | "portrait" | "image";
+  label?: string;
+  aspectRatio?: string;
 };
 
 export type IllustrationJob = {
   ok: boolean;
+  provider?: string;
+  model?: string;
   promptId?: string;
   status?: string;
+  complete?: boolean;
+  imageUrl?: string;
+  filePath?: string;
+  bytes?: number;
+  contentType?: string;
   prompt?: string;
+  revisedPrompt?: string;
   negativePrompt?: string;
   seed?: number;
   error?: string;
   message?: string;
 };
+
+export type ImageProvider = "comfy" | "grok";
 
 export type IllustrationImage = {
   filename: string;
@@ -282,11 +352,13 @@ export type ContextAnalyzeResponse = {
   analysis: ContextAnalysis;
 };
 
-export type DeepSeekKeySaveResponse = {
+export type ApiKeySaveResponse = {
   ok: boolean;
   configured: boolean;
   message?: string;
 };
+
+export type DeepSeekKeySaveResponse = ApiKeySaveResponse;
 
 export type ProjectFileSummary = {
   id: string;
@@ -310,6 +382,81 @@ export type ProjectFileOpenResponse = {
   fileName: string;
   filePath: string;
   project: BookProject;
+};
+
+export type LibraryProjectSummary = {
+  id: string;
+  title: string;
+  savedAt: string;
+  wordCount: number;
+  chapterCount: number;
+  preview: string;
+  fileName: string;
+  sourcePath: string;
+  updatedAt: string;
+  categories: LibraryCategory[];
+  categoryIds: string[];
+};
+
+export type LibraryCategory = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  projectCount: number;
+};
+
+export type LibraryListResponse = {
+  ok: boolean;
+  dbPath: string;
+  projects: LibraryProjectSummary[];
+};
+
+export type LibraryOpenResponse = {
+  ok: boolean;
+  project: BookProject;
+  summary: LibraryProjectSummary;
+};
+
+export type LibrarySaveResponse = {
+  ok: boolean;
+  dbPath: string;
+  project: LibraryProjectSummary;
+};
+
+export type LibraryDeleteResponse = {
+  ok: boolean;
+  dbPath: string;
+  project?: LibraryProjectSummary;
+  categories?: LibraryCategory[];
+};
+
+export type LibraryImportResponse = {
+  ok: boolean;
+  dbPath: string;
+  imported: number;
+  skipped: number;
+  scannedDirs: string[];
+  projects: LibraryProjectSummary[];
+};
+
+export type LibraryCategoryListResponse = {
+  ok: boolean;
+  dbPath: string;
+  categories: LibraryCategory[];
+};
+
+export type LibraryCategoryCreateResponse = {
+  ok: boolean;
+  dbPath: string;
+  category: LibraryCategory;
+};
+
+export type LibraryCategoryAssignResponse = {
+  ok: boolean;
+  dbPath: string;
+  project: LibraryProjectSummary;
+  categories: LibraryCategory[];
 };
 
 export function normalizeApiBase(value: string): string {
@@ -337,6 +484,52 @@ export async function listProjectFiles(apiBase: string): Promise<ProjectFileList
 
 export async function openProjectFile(apiBase: string, id: string): Promise<ProjectFileOpenResponse> {
   return requestJson<ProjectFileOpenResponse>(apiBase, `/api/projects/open/${encodeURIComponent(id)}`);
+}
+
+export async function listLibraryProjects(apiBase: string): Promise<LibraryListResponse> {
+  return requestJson<LibraryListResponse>(apiBase, "/api/library/list");
+}
+
+export async function openLibraryProject(apiBase: string, id: string): Promise<LibraryOpenResponse> {
+  return requestJson<LibraryOpenResponse>(apiBase, `/api/library/open/${encodeURIComponent(id)}`);
+}
+
+export async function saveLibraryProject(apiBase: string, project: BookProject, categoryIds: string[] = []): Promise<LibrarySaveResponse> {
+  return requestJson<LibrarySaveResponse>(apiBase, "/api/library/save", {
+    method: "POST",
+    body: JSON.stringify({ project, categoryIds }),
+  });
+}
+
+export async function deleteLibraryProject(apiBase: string, id: string): Promise<LibraryDeleteResponse> {
+  return requestJson<LibraryDeleteResponse>(apiBase, `/api/library/delete/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function importJsonProjectsToLibrary(apiBase: string): Promise<LibraryImportResponse> {
+  return requestJson<LibraryImportResponse>(apiBase, "/api/library/import-json", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function listLibraryCategories(apiBase: string): Promise<LibraryCategoryListResponse> {
+  return requestJson<LibraryCategoryListResponse>(apiBase, "/api/library/categories");
+}
+
+export async function createLibraryCategory(apiBase: string, name: string): Promise<LibraryCategoryCreateResponse> {
+  return requestJson<LibraryCategoryCreateResponse>(apiBase, "/api/library/categories", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function assignLibraryCategory(apiBase: string, projectId: string, categoryId: string): Promise<LibraryCategoryAssignResponse> {
+  return requestJson<LibraryCategoryAssignResponse>(apiBase, "/api/library/categories/assign", {
+    method: "POST",
+    body: JSON.stringify({ projectId, categoryId }),
+  });
 }
 
 export async function synthesizeSpeech(apiBase: string, payload: TtsRequest): Promise<TtsResponse> {
@@ -371,6 +564,13 @@ export async function generateStory(apiBase: string, payload: StoryGenerateReque
   });
 }
 
+export async function rechapterStory(apiBase: string, payload: StoryRechapterRequest): Promise<StoryRechapterResponse> {
+  return requestJson<StoryRechapterResponse>(apiBase, "/api/story/rechapter", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function planFilm(apiBase: string, payload: FilmPlanRequest): Promise<FilmPlanResponse> {
   return requestJson<FilmPlanResponse>(apiBase, "/api/film/plan", {
     method: "POST",
@@ -387,6 +587,13 @@ export async function cacheImage(apiBase: string, imageUrl: string, kind: string
 
 export async function saveDeepSeekApiKey(apiBase: string, apiKey: string, clear = false): Promise<DeepSeekKeySaveResponse> {
   return requestJson<DeepSeekKeySaveResponse>(apiBase, "/api/settings/deepseek-key", {
+    method: "POST",
+    body: JSON.stringify({ apiKey, clear }),
+  });
+}
+
+export async function saveXaiApiKey(apiBase: string, apiKey: string, clear = false): Promise<ApiKeySaveResponse> {
+  return requestJson<ApiKeySaveResponse>(apiBase, "/api/settings/xai-key", {
     method: "POST",
     body: JSON.stringify({ apiKey, clear }),
   });
