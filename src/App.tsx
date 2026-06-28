@@ -31,17 +31,21 @@ import {
   AiProvider,
   ApiHealth,
   analyzeContext,
+  BookMakerMessage,
   cacheImage,
   ContextAnalysis,
+  continueBookMakerInterview,
   FilmPlan,
   assignLibraryCategory,
   deleteLibraryProject,
+  finalizeBookMakerPrompt,
   generateIllustration,
   generateStory,
   getHealth,
   getIllustrationStatus,
   getModelCatalog,
   createLibraryCategory,
+  ExternalStoryCommand,
   importJsonProjectsToLibrary,
   ImageProvider,
   LibraryCategory,
@@ -52,6 +56,7 @@ import {
   mediaUrl,
   ModelCatalogResponse,
   ModelOption,
+  getNextExternalStoryCommand,
   openLibraryProject,
   openProjectFile,
   planFilm,
@@ -59,6 +64,7 @@ import {
   rechapterStory,
   saveDeepSeekApiKey,
   saveLibraryProject,
+  saveModelsLabApiKey,
   saveXaiApiKey,
   synthesizeSpeech,
 } from "./lib/bookreaderApi";
@@ -85,6 +91,7 @@ import {
 
 type SpeechState = "idle" | "speaking" | "paused";
 type TtsProvider = "browser" | "server";
+type WorkspaceTab = "reader" | "bookMaker";
 type VoiceStyleId = "neutral" | "story" | "lively" | "calm";
 type StoryLanguage = "Auto" | "Nederlands" | "English" | "Deutsch" | "Français" | "Español";
 type StoryNarrativePreset = "balanced" | "rich_intro";
@@ -93,6 +100,20 @@ type CharacterPortraitRecord = CharacterPortrait & { imageUrl?: string };
 type ReferenceStoryProject = {
   title: string;
   rawText: string;
+};
+type StoryCreateOptions = {
+  prompt: string;
+  meta: StoryPromptMeta;
+  pages: number;
+  wordsPerPage: number;
+  genre: string;
+  tone: string;
+  language: StoryLanguage;
+  mode: "fast" | "deep";
+  provider: AiProvider;
+  model?: string;
+  narrativePreset: StoryNarrativePreset;
+  sourceLabel?: string;
 };
 type SavedStoryEntry = {
   id: string;
@@ -200,7 +221,14 @@ const sampleText = [
   "Per hoofdstuk kan een lokale stem worden gekozen. De app bewaart geen tekst buiten deze sessie.",
 ].join("\n");
 
+const INITIAL_TALLE_MESSAGE: BookMakerMessage = {
+  role: "talle",
+  content:
+    "Lieve John, kom, laten we niet meteen naar de betekenis springen. Neem me eerst mee naar het eerste beeld. Waar zijn we, en wat zie jij als het begin van deze reis?",
+};
+
 export function App() {
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("reader");
   const [documentTitle, setDocumentTitle] = useState("Nieuw document");
   const [rawText, setRawText] = useState(sampleText);
   const [chapters, setChapters] = useState<Chapter[]>(() => splitIntoChapters(sampleText).chapters);
@@ -227,10 +255,13 @@ export function App() {
   const [selectedGrokModel, setSelectedGrokModel] = useState("");
   const [imageProvider, setImageProvider] = useState<ImageProvider>("comfy");
   const [selectedGrokImageModel, setSelectedGrokImageModel] = useState("");
+  const [selectedModelsLabImageModel, setSelectedModelsLabImageModel] = useState("");
   const [deepSeekApiKeyInput, setDeepSeekApiKeyInput] = useState("");
   const [deepSeekKeyBusy, setDeepSeekKeyBusy] = useState(false);
   const [xaiApiKeyInput, setXaiApiKeyInput] = useState("");
   const [xaiKeyBusy, setXaiKeyBusy] = useState(false);
+  const [modelsLabApiKeyInput, setModelsLabApiKeyInput] = useState("");
+  const [modelsLabKeyBusy, setModelsLabKeyBusy] = useState(false);
   const [illustrationStyleId, setIllustrationStyleId] = useState<IllustrationStyleId>("storybook");
   const [illustrationPrompt, setIllustrationPrompt] = useState("");
   const [illustrationStatus, setIllustrationStatus] = useState("geen illustratie");
@@ -266,7 +297,7 @@ export function App() {
   const [storyLanguage, setStoryLanguage] = useState<StoryLanguage>("Auto");
   const [storyMode, setStoryMode] = useState<"fast" | "deep">("deep");
   const [storyNarrativePreset, setStoryNarrativePreset] = useState<StoryNarrativePreset>("balanced");
-  const [aiProvider, setAiProvider] = useState<AiProvider>("local");
+  const [aiProvider, setAiProvider] = useState<AiProvider>("deepseek");
   const [chapterTargetCount, setChapterTargetCount] = useState(8);
   const [chapteringBusy, setChapteringBusy] = useState(false);
   const [chapteringStatus, setChapteringStatus] = useState("AI-hoofdstukken klaar");
@@ -305,6 +336,11 @@ export function App() {
   const [projectFiles, setProjectFiles] = useState<ProjectFileSummary[]>([]);
   const [projectScanBusy, setProjectScanBusy] = useState(false);
   const [projectScanStatus, setProjectScanStatus] = useState("JSON-bestanden nog niet gescand");
+  const [bookMakerMessages, setBookMakerMessages] = useState<BookMakerMessage[]>([INITIAL_TALLE_MESSAGE]);
+  const [bookMakerInput, setBookMakerInput] = useState("");
+  const [bookMakerBusy, setBookMakerBusy] = useState(false);
+  const [bookMakerStatus, setBookMakerStatus] = useState("Talle wacht op de eerste scène.");
+  const [bookMakerPromptPreview, setBookMakerPromptPreview] = useState("");
   const [query, setQuery] = useState("");
   const [isParsing, setIsParsing] = useState(false);
   const [notice, setNotice] = useState("");
@@ -314,6 +350,7 @@ export function App() {
   const queueRef = useRef<string[]>([]);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const externalCommandBusyRef = useRef(false);
 
   const selectedChapter = chapters.find((chapter) => chapter.id === selectedChapterId) || chapters[0];
   const filteredChapters = useMemo(() => {
@@ -361,6 +398,10 @@ export function App() {
   const grokImageModelOptions = useMemo(
     () => withSelectedModel(modelCatalog?.xaiImageApi.models || [], selectedGrokImageModel),
     [modelCatalog?.xaiImageApi.models, selectedGrokImageModel],
+  );
+  const modelsLabImageModelOptions = useMemo(
+    () => withSelectedModel(modelCatalog?.modelslabImageApi.models || [], selectedModelsLabImageModel),
+    [modelCatalog?.modelslabImageApi.models, selectedModelsLabImageModel],
   );
   const activeModelOptions =
     normalizedAiProvider === "deepseek" ? deepseekModelOptions : normalizedAiProvider === "grok" ? grokModelOptions : localModelOptions;
@@ -424,6 +465,33 @@ export function App() {
     void refreshLibrary(false);
     void refreshCategories(false);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const pollForAliceCommand = async () => {
+      if (cancelled || externalCommandBusyRef.current) return;
+      externalCommandBusyRef.current = true;
+      try {
+        const response = await getNextExternalStoryCommand(apiBase);
+        if (!cancelled && response.command) {
+          await applyExternalStoryCommand(response.command);
+        }
+      } catch (error) {
+        console.debug("Geen extern Alice-commando beschikbaar", error);
+      } finally {
+        externalCommandBusyRef.current = false;
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void pollForAliceCommand();
+    }, 1500);
+    void pollForAliceCommand();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [apiBase]);
 
   function processText(title: string, text: string) {
     const result = splitIntoChapters(text);
@@ -685,30 +753,53 @@ export function App() {
       setNotice("Geef eerst een verhaalprompt.");
       return;
     }
+    await createStoryFromPromptOptions({
+      prompt: storyPrompt,
+      meta: storyPromptMeta,
+      pages: storyPages,
+      wordsPerPage: storyWordsPerPage,
+      genre: storyGenre,
+      tone: storyTone,
+      language: storyLanguage,
+      mode: storyMode,
+      provider: aiProvider,
+      model: selectedAiModel || undefined,
+      narrativePreset: storyNarrativePreset,
+    });
+  }
+
+  async function createStoryFromPromptOptions(options: StoryCreateOptions) {
+    const cleanPrompt = options.prompt.trim();
+    if (!cleanPrompt) {
+      setNotice("Geef eerst een verhaalprompt.");
+      return;
+    }
     setStoryBusy(true);
-    const providerLabel = aiProviderLabel(aiProvider);
-    const presetLabel = storyNarrativePreset === "rich_intro" ? " met veel detail en lange intro" : "";
+    const providerLabel = aiProviderLabel(options.provider);
+    const presetLabel = options.narrativePreset === "rich_intro" ? " met veel detail en lange intro" : "";
     const sequelLabel = sequelSourceText ? ` als vervolg op ${sequelSourceTitle || "het gekozen verhaal"}` : "";
+    const modelLabel = options.model || activeModelLabel;
+    const sourceLabel = options.sourceLabel ? `${options.sourceLabel}: ` : "";
     setStoryStatus(
-      storyMode === "deep"
-        ? `${providerLabel} ${activeModelLabel} schrijft uitgebreid${presetLabel}${sequelLabel}...`
-        : `${providerLabel} ${activeModelLabel} schrijft kort${presetLabel}${sequelLabel}...`,
+      options.mode === "deep"
+        ? `${sourceLabel}${providerLabel} ${modelLabel} schrijft uitgebreid${presetLabel}${sequelLabel}...`
+        : `${sourceLabel}${providerLabel} ${modelLabel} schrijft kort${presetLabel}${sequelLabel}...`,
     );
     setNotice("");
     try {
       const references = combinedReferencePayload();
       const response = await generateStory(apiBase, {
-        prompt: storyPrompt,
-        pages: storyPages,
-        wordsPerPage: storyWordsPerPage,
-        genre: storyGenre,
-        tone: storyTone,
+        prompt: cleanPrompt,
+        pages: options.pages,
+        wordsPerPage: options.wordsPerPage,
+        genre: options.genre,
+        tone: options.tone,
         audience: "lezers die een duidelijk verhaal met scènes en personages willen",
-        language: storyLanguage,
-        mode: storyMode,
-        provider: aiProvider,
-        model: selectedAiModel || undefined,
-        narrativePreset: storyNarrativePreset,
+        language: options.language,
+        mode: options.mode,
+        provider: options.provider,
+        model: options.model || undefined,
+        narrativePreset: options.narrativePreset,
         referenceTitle: references.title,
         referenceText: references.text,
         sequelOfTitle: sequelSourceTitle,
@@ -726,7 +817,7 @@ export function App() {
         chapterIllustrations: [],
         characterPortraits: [],
         bookCover: { prompt: buildCoverPrompt(response.title, generatedChapters, illustrationStyleId) },
-        storyPrompt: storyPromptMeta,
+        storyPrompt: options.meta,
       } satisfies BookProject;
       saveStoryToLibrary(generatedProject);
       let libraryNote = "";
@@ -750,6 +841,255 @@ export function App() {
       setNotice(message);
     } finally {
       setStoryBusy(false);
+    }
+  }
+
+  async function applyExternalStoryCommand(command: ExternalStoryCommand) {
+    if (command.type !== "story-from-alice") return;
+
+    const emptyPrompt = buildGuidedStoryPrompt("", "", "");
+    const pages = closestAllowedNumber(command.pages || 6, [2, 4, 6, 8, 12, 16, 24]);
+    const wordsPerPage = closestAllowedNumber(command.wordsPerPage || 550, [350, 550, 750, 1000]);
+    const provider: AiProvider = command.provider && isAiProvider(command.provider) ? command.provider : "deepseek";
+    const language = toStoryLanguage(command.language || "Auto");
+    const mode = command.mode === "fast" ? "fast" : "deep";
+    const narrativePreset: StoryNarrativePreset = pages >= 8 ? "rich_intro" : "balanced";
+    const genre = command.genre?.trim() || "verhalende fictie";
+    const tone = command.tone?.trim() || "beeldend, warm en spannend";
+
+    setWorkspaceTab("reader");
+    setPromptBuilderOpen(true);
+    setPromptCharacters("");
+    setPromptPlot("");
+    setPromptMainEvent("");
+    setPromptDraft("");
+    setStoryPrompt("");
+    setStoryPromptMeta(emptyPrompt);
+    setAiProvider(provider);
+    setStoryMode(mode);
+    setStoryPages(pages);
+    setStoryWordsPerPage(wordsPerPage);
+    setStoryLanguage(language);
+    setStoryGenre(genre);
+    setStoryTone(tone);
+    setStoryNarrativePreset(narrativePreset);
+    setNotice("Alice wist de BookReader promptvelden...");
+    await wait(120);
+
+    const promptMeta = buildGuidedStoryPrompt(command.characters, command.plot, command.mainEvent);
+    setPromptCharacters(promptMeta.characters);
+    setPromptPlot(promptMeta.plot);
+    setPromptMainEvent(promptMeta.mainEvent);
+    setPromptDraft(promptMeta.prompt);
+    setStoryPrompt(promptMeta.prompt);
+    setStoryPromptMeta(promptMeta);
+    setNotice(`Alice heeft BookReader ingevuld (${pages} pagina's, ${aiProviderLabel(provider)}).`);
+
+    if (command.autoGenerate !== false) {
+      await createStoryFromPromptOptions({
+        prompt: promptMeta.prompt,
+        meta: promptMeta,
+        pages,
+        wordsPerPage,
+        genre,
+        tone,
+        language,
+        mode,
+        provider,
+        model: command.model || undefined,
+        narrativePreset,
+        sourceLabel: "Alice",
+      });
+    }
+  }
+
+  async function sendBookMakerAnswer() {
+    const answer = bookMakerInput.trim();
+    if (!answer) {
+      setNotice("Schrijf eerst een antwoord voor Talle.");
+      return;
+    }
+    const johnMessage: BookMakerMessage = { role: "john", content: answer, createdAt: new Date().toISOString() };
+    const nextMessages = [...bookMakerMessages, johnMessage];
+    setBookMakerMessages(nextMessages);
+    setBookMakerInput("");
+    setBookMakerBusy(true);
+    setBookMakerStatus(`${aiProviderLabel(aiProvider)} ${activeModelLabel} laat Talle doorvragen...`);
+    setNotice("");
+    try {
+      const response = await continueBookMakerInterview(apiBase, {
+        messages: nextMessages,
+        provider: aiProvider,
+        model: selectedAiModel || undefined,
+        mode: storyMode,
+      });
+      const talMessage: BookMakerMessage = { role: "talle", content: response.reply, createdAt: new Date().toISOString() };
+      setBookMakerMessages([...nextMessages, talMessage]);
+      const fallbackNote = response.fallbackUsed ? " met lokale fallback" : "";
+      setBookMakerStatus(`Talle luistert verder (${responseProviderLabel(response.provider)} ${response.model}${fallbackNote}).`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Talle kon nu niet antwoorden.";
+      setBookMakerStatus(message);
+      setNotice(message);
+    } finally {
+      setBookMakerBusy(false);
+    }
+  }
+
+  function resetBookMakerSession() {
+    setBookMakerMessages([INITIAL_TALLE_MESSAGE]);
+    setBookMakerInput("");
+    setBookMakerPromptPreview("");
+    setBookMakerStatus("Nieuwe Boek-maker-sessie gestart.");
+  }
+
+  async function finishBookMakerSession() {
+    if (!bookMakerMessages.some((message) => message.role === "john" && message.content.trim())) {
+      setNotice("Beantwoord eerst minstens een vraag van Talle.");
+      return;
+    }
+    setBookMakerBusy(true);
+    setStoryBusy(true);
+    setImageProvider("grok");
+    const targetLanguage = storyLanguage === "Auto" ? "Nederlands" : storyLanguage;
+    setBookMakerStatus(`${aiProviderLabel(aiProvider)} ${activeModelLabel} vormt het interview om tot prompt...`);
+    setStoryStatus("Boek-maker maakt een verhaal van 6 hoofdstukken...");
+    setNotice("");
+    try {
+      const promptResponse = await finalizeBookMakerPrompt(apiBase, {
+        messages: bookMakerMessages,
+        provider: aiProvider,
+        model: selectedAiModel || undefined,
+        mode: storyMode,
+        language: targetLanguage,
+      });
+      const nextPromptMeta: StoryPromptMeta = {
+        characters: promptResponse.characters,
+        plot: promptResponse.plot,
+        mainEvent: promptResponse.mainEvent,
+        prompt: promptResponse.prompt,
+        updatedAt: new Date().toISOString(),
+      };
+      setStoryPrompt(promptResponse.prompt);
+      setStoryPromptMeta(nextPromptMeta);
+      setPromptDraft(promptResponse.prompt);
+      setPromptCharacters(promptResponse.characters);
+      setPromptPlot(promptResponse.plot);
+      setPromptMainEvent(promptResponse.mainEvent);
+      setStoryPages(6);
+      setStoryWordsPerPage(750);
+      setStoryMode("deep");
+      setStoryNarrativePreset("rich_intro");
+      setStoryLanguage(targetLanguage as StoryLanguage);
+      setBookMakerPromptPreview(promptResponse.prompt);
+      setBookMakerStatus("Prompt klaar; Talle laat het verhaal schrijven...");
+
+      const response = await generateStory(apiBase, {
+        prompt: promptResponse.prompt,
+        pages: 6,
+        wordsPerPage: 750,
+        genre: "persoonlijke spirituele fictieroman",
+        tone: "warm, concreet, literair, invoelend en licht ironisch",
+        audience: "lezers van persoonlijke spirituele fictie met concrete scènes en innerlijke betekenis",
+        language: targetLanguage,
+        mode: "deep",
+        provider: aiProvider,
+        model: selectedAiModel || undefined,
+        narrativePreset: "rich_intro",
+      });
+
+      processText(response.title, response.story);
+      const generatedChapters = splitIntoChapters(response.story).chapters;
+      const cover = { prompt: buildCoverPrompt(response.title, generatedChapters, illustrationStyleId) };
+      setBookCover(cover);
+      setChapterIllustrations({});
+      setIllustrationUrl("");
+      setIllustrationJobId("");
+      setBookMakerStatus("Verhaal klaar; Grok maakt illustraties per hoofdstuk...");
+      const illustrationMap = await createBookMakerChapterIllustrations(response.title, generatedChapters);
+      const savedAt = new Date().toISOString();
+      const generatedProject = {
+        schema: "bookreader.project.v1",
+        savedAt,
+        title: response.title,
+        rawText: response.story,
+        illustrationStyleId,
+        chapterIllustrations: Object.values(illustrationMap),
+        characterPortraits: [],
+        bookCover: cover,
+        storyPrompt: nextPromptMeta,
+      } satisfies BookProject;
+      saveStoryToLibrary(generatedProject);
+      let libraryNote = "";
+      try {
+        const saved = await saveLibraryProject(apiBase, generatedProject, selectedCategoryId ? [selectedCategoryId] : []);
+        setCurrentLibraryProjectId(saved.project.id);
+        await refreshLibrary(false);
+        await refreshCategories(false);
+        libraryNote = " en in SQL opgeslagen";
+      } catch {
+        libraryNote = "";
+      }
+      const imageCount = Object.keys(illustrationMap).length;
+      const promptNote = promptResponse.fallbackUsed ? " Promptfallback gebruikt." : "";
+      setBookMakerStatus(`Boek-maker klaar: ${generatedChapters.length} hoofdstukken, ${imageCount} Grok-illustraties.${promptNote}`);
+      setStoryStatus(`${responseProviderLabel(response.provider)} ${response.model}: ${response.wordCount.toLocaleString("nl-NL")} woorden gemaakt`);
+      setNotice(`Boek-maker verhaal geladen: ${response.title}${libraryNote}.`);
+      setWorkspaceTab("reader");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Boek-maker kon de sessie niet afronden.";
+      setBookMakerStatus(message);
+      setStoryStatus(message);
+      setNotice(message);
+    } finally {
+      setStoryBusy(false);
+      setBookMakerBusy(false);
+    }
+  }
+
+  async function createBookMakerChapterIllustrations(title: string, chapterList: Chapter[]): Promise<ChapterIllustrationMap> {
+    const nextMap: ChapterIllustrationMap = {};
+    const providerLabel = imageProviderLabel(imageProvider);
+    setIllustrationBusy(true);
+    setIllustrationStatus(`${providerLabel} maakt boekillustraties...`);
+    try {
+      for (const chapter of chapterList) {
+        const prompt = buildIllustrationPrompt(title, chapter, illustrationStyleId);
+        setIllustrationStatus(`${providerLabel} illustreert ${chapter.title}...`);
+        setBookMakerStatus(`${providerLabel} illustreert ${chapter.index + 1}/${chapterList.length}: ${chapter.title}`);
+        const job = await generateIllustration(apiBase, {
+          prompt,
+          negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+          provider: imageProvider,
+          model: selectedImageModel(),
+          kind: "chapter",
+          label: chapter.title,
+          aspectRatio: "4:3",
+        });
+        const resolved = await resolveImageJob(job, "chapter", chapter.title);
+        if (!resolved.imageUrl) continue;
+        const record = {
+          chapterId: chapter.id,
+          prompt,
+          imageUrl: resolved.imageUrl,
+          jobId: resolved.jobId,
+        };
+        nextMap[chapter.id] = record;
+        setChapterIllustrations((previous) => ({ ...previous, [chapter.id]: record }));
+        if (!illustrationUrl || chapter.index === 0) {
+          setIllustrationUrl(resolved.imageUrl);
+          setIllustrationJobId(resolved.jobId);
+        }
+      }
+      setIllustrationStatus(`${Object.keys(nextMap).length} ${providerLabel}-illustraties klaar`);
+      return nextMap;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `${providerLabel}-illustraties konden niet allemaal worden gemaakt.`;
+      setIllustrationStatus(message);
+      setNotice(message);
+      return nextMap;
+    } finally {
+      setIllustrationBusy(false);
     }
   }
 
@@ -944,7 +1284,8 @@ export function App() {
       const comfyLabel = health.comfy?.workflowConfigured ? "Comfy workflow aan" : "Comfy workflow uit";
       const deepseekLabel = health.deepseekApi?.configured ? "DeepSeek API aan" : "DeepSeek key ontbreekt";
       const grokLabel = health.xaiApi?.configured ? "Grok API aan" : "Grok key ontbreekt";
-      setApiStatus(`${ttsLabel}, ${comfyLabel}, ${deepseekLabel}, ${grokLabel}`);
+      const modelsLabLabel = health.modelslabApi?.configured ? "ModelsLab aan" : "ModelsLab key ontbreekt";
+      setApiStatus(`${ttsLabel}, ${comfyLabel}, ${deepseekLabel}, ${grokLabel}, ${modelsLabLabel}`);
       if (showNotice) setNotice("Serverlaag bereikt.");
     } catch (error) {
       setApiHealth(null);
@@ -971,22 +1312,25 @@ export function App() {
       setSelectedApiModel((current) => chooseCatalogModel(current, catalog.deepseekApi.models, [catalog.defaults.api.story, catalog.defaults.api.context]));
       setSelectedGrokModel((current) => chooseCatalogModel(current, catalog.xaiApi.models, [catalog.defaults.xai.film, catalog.defaults.xai.story, catalog.defaults.xai.context]));
       setSelectedGrokImageModel((current) => chooseCatalogModel(current, catalog.xaiImageApi.models, [catalog.defaults.xai.image]));
+      setSelectedModelsLabImageModel((current) => chooseCatalogModel(current, catalog.modelslabImageApi.models, [catalog.defaults.modelslab.image]));
       const ollamaLabel = catalog.ollama.models.length ? `${catalog.ollama.models.length} Ollama` : "geen Ollama";
       const deepseekLabel = catalog.deepseekApi.models.length ? `${catalog.deepseekApi.models.length} DeepSeek API` : "geen DeepSeek API";
       const grokLabel = catalog.xaiApi.models.length ? `${catalog.xaiApi.models.length} Grok API` : "geen Grok API";
       const grokImageLabel = catalog.xaiImageApi.models.length ? `${catalog.xaiImageApi.models.length} Grok beeld` : "geen Grok beeld";
+      const modelsLabImageLabel = catalog.modelslabImageApi.models.length ? `${catalog.modelslabImageApi.models.length} ModelsLab beeld` : "geen ModelsLab beeld";
       const warning = [
         catalog.ollama.error ? "Ollama lijst niet live" : "",
         catalog.deepseekApi.error ? "DeepSeek lijst fallback" : "",
         catalog.xaiApi.error ? "Grok lijst fallback" : "",
         catalog.xaiImageApi.error ? "Grok beeldlijst fallback" : "",
+        catalog.modelslabImageApi.error ? "ModelsLab beeldlijst fallback" : "",
       ]
         .filter(Boolean)
         .join(", ");
       setModelCatalogStatus(
         warning
-          ? `${ollamaLabel}, ${deepseekLabel}, ${grokLabel}, ${grokImageLabel} (${warning})`
-          : `${ollamaLabel}, ${deepseekLabel}, ${grokLabel}, ${grokImageLabel}`,
+          ? `${ollamaLabel}, ${deepseekLabel}, ${grokLabel}, ${grokImageLabel}, ${modelsLabImageLabel} (${warning})`
+          : `${ollamaLabel}, ${deepseekLabel}, ${grokLabel}, ${grokImageLabel}, ${modelsLabImageLabel}`,
       );
       if (showNotice) setNotice("Modellenlijst bijgewerkt.");
     } catch (error) {
@@ -1074,6 +1418,44 @@ export function App() {
     }
   }
 
+  async function saveModelsLabKey() {
+    const apiKey = modelsLabApiKeyInput.trim();
+    if (!apiKey) {
+      setNotice("Plak eerst een ModelsLab API key.");
+      return;
+    }
+    setModelsLabKeyBusy(true);
+    try {
+      const response = await saveModelsLabApiKey(apiBase, apiKey);
+      setModelsLabApiKeyInput("");
+      setNotice(response.message || "ModelsLab API key is opgeslagen.");
+      await refreshApiHealth(false);
+      await refreshModelCatalog(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "ModelsLab API key kon niet worden opgeslagen.";
+      setNotice(message);
+    } finally {
+      setModelsLabKeyBusy(false);
+    }
+  }
+
+  async function clearModelsLabKey() {
+    setModelsLabKeyBusy(true);
+    try {
+      const response = await saveModelsLabApiKey(apiBase, "", true);
+      setModelsLabApiKeyInput("");
+      if (imageProvider === "modelslab") setImageProvider("comfy");
+      setNotice(response.message || "ModelsLab API key is gewist.");
+      await refreshApiHealth(false);
+      await refreshModelCatalog(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "ModelsLab API key kon niet worden gewist.";
+      setNotice(message);
+    } finally {
+      setModelsLabKeyBusy(false);
+    }
+  }
+
   async function cacheGeneratedImage(imageUrl: string, kind: string, label?: string): Promise<string> {
     const cached = await cacheImage(apiBase, imageUrl, kind, label);
     if (cached.filePath) {
@@ -1110,7 +1492,9 @@ export function App() {
   }
 
   function selectedImageModel(): string | undefined {
-    return imageProvider === "grok" ? selectedGrokImageModel || modelCatalog?.defaults.xai.image : undefined;
+    if (imageProvider === "grok") return selectedGrokImageModel || modelCatalog?.defaults.xai.image;
+    if (imageProvider === "modelslab") return selectedModelsLabImageModel || modelCatalog?.defaults.modelslab.image;
+    return undefined;
   }
 
   async function createIllustration() {
@@ -1702,7 +2086,220 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${workspaceTab === "bookMaker" ? "book-maker-app" : ""}`}>
+      <div className="workspace-switcher" aria-label="Werkruimte">
+        <button
+          type="button"
+          className={workspaceTab === "reader" ? "" : "quiet"}
+          onClick={() => setWorkspaceTab("reader")}
+        >
+          <BookOpen size={16} />
+          <span>Lezer</span>
+        </button>
+        <button
+          type="button"
+          className={workspaceTab === "bookMaker" ? "" : "quiet"}
+          onClick={() => setWorkspaceTab("bookMaker")}
+        >
+          <BookImage size={16} />
+          <span>Boek maker</span>
+        </button>
+      </div>
+      {workspaceTab === "bookMaker" ? (
+        <section className="book-maker-shell">
+          <header className="book-maker-header">
+            <div>
+              <span className="eyebrow">Talle Wintrip</span>
+              <h2>Boek maker</h2>
+            </div>
+            <div className="book-maker-controls">
+              <label className="field compact-field">
+                <span>AI-bron</span>
+                <select value={aiProvider} onChange={(event) => setAiProvider(event.target.value as AiProvider)}>
+                  <option value="local">Lokale Ollama</option>
+                  <option value="deepseek">DeepSeek API</option>
+                </select>
+              </label>
+              <label className="field compact-field model-field">
+                <span>{aiProviderModelLabel(aiProvider)}</span>
+                <select
+                  value={selectedAiModel}
+                  onChange={(event) => {
+                    if (normalizedAiProvider === "deepseek") {
+                      setSelectedApiModel(event.target.value);
+                    } else if (normalizedAiProvider === "grok") {
+                      setSelectedGrokModel(event.target.value);
+                    } else {
+                      setSelectedLocalModel(event.target.value);
+                    }
+                  }}
+                  disabled={!activeModelOptions.length && !selectedAiModel}
+                >
+                  {activeModelOptions.length ? (
+                    activeModelOptions.map((model) => (
+                      <option value={model.id} key={model.id}>
+                        {model.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">Geen modellen gevonden</option>
+                  )}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="quiet icon-button model-refresh-button"
+                onClick={() => void refreshModelCatalog(true)}
+                disabled={modelCatalogBusy}
+                title="Modellen vernieuwen"
+                aria-label="Modellen vernieuwen"
+              >
+                {modelCatalogBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
+              </button>
+            </div>
+          </header>
+
+          {notice ? <div className="notice">{notice}</div> : null}
+
+          <div className="book-maker-grid">
+            <section className="tool-panel book-maker-interview">
+              <div className="panel-title">
+                <Sparkles size={17} />
+                <span>Interview</span>
+              </div>
+              <figure className="talle-portrait">
+                <img src="/assets/talle-wintrip.jpeg" alt="Talle Wintrip" />
+                <figcaption>Talle Wintrip</figcaption>
+              </figure>
+              <div className="talle-transcript">
+                {bookMakerMessages.map((message, index) => (
+                  <article className={`talle-message ${message.role}`} key={`${message.role}-${index}`}>
+                    <small>{message.role === "talle" ? "Talle" : "John"}</small>
+                    <p>{message.content}</p>
+                  </article>
+                ))}
+              </div>
+              <label className="field">
+                <span>Antwoord</span>
+                <textarea
+                  value={bookMakerInput}
+                  onChange={(event) => setBookMakerInput(event.target.value)}
+                  rows={6}
+                  placeholder="Vertel Talle wat je ziet, wie erbij is, wat er gebeurt..."
+                />
+              </label>
+              <div className="button-row">
+                <button type="button" onClick={() => void sendBookMakerAnswer()} disabled={bookMakerBusy || !bookMakerInput.trim()}>
+                  {bookMakerBusy ? <Loader2 size={16} /> : <Sparkles size={16} />}
+                  <span>{bookMakerBusy ? "Luistert..." : "Stuur naar Talle"}</span>
+                </button>
+                <button
+                  type="button"
+                  className="quiet"
+                  onClick={() => void finishBookMakerSession()}
+                  disabled={bookMakerBusy || storyBusy || !bookMakerMessages.some((message) => message.role === "john")}
+                >
+                  {bookMakerBusy || storyBusy ? <Loader2 size={16} /> : <Wand2 size={16} />}
+                  <span>Afronden</span>
+                </button>
+                <button type="button" className="quiet" onClick={resetBookMakerSession} disabled={bookMakerBusy || storyBusy}>
+                  <Trash2 size={16} />
+                  <span>Nieuw</span>
+                </button>
+              </div>
+              <p className="voice-style-note">{bookMakerStatus}</p>
+            </section>
+
+            <aside className="tool-panel book-maker-brief">
+              <div className="panel-title">
+                <FileText size={17} />
+                <span>Prompt</span>
+              </div>
+              <div className="button-row">
+                <label className="field compact-field">
+                  <span>Hoofdstukken</span>
+                  <select value={6} disabled>
+                    <option value={6}>6</option>
+                  </select>
+                </label>
+                <label className="field compact-field">
+                  <span>Beeldmaker</span>
+                  <select value={imageProvider} onChange={(event) => setImageProvider(event.target.value as ImageProvider)}>
+                    <option value="comfy">ComfyUI lokaal</option>
+                    <option value="grok">Grok Imagine</option>
+                    <option value="modelslab">ModelsLab</option>
+                  </select>
+                </label>
+              </div>
+              {imageProvider === "grok" ? (
+                <label className="field">
+                  <span>Grok beeldmodel</span>
+                  <select
+                    value={selectedGrokImageModel}
+                    onChange={(event) => setSelectedGrokImageModel(event.target.value)}
+                    disabled={!grokImageModelOptions.length && !selectedGrokImageModel}
+                  >
+                    {grokImageModelOptions.length ? (
+                      grokImageModelOptions.map((model) => (
+                        <option value={model.id} key={model.id}>
+                          {model.label}
+                        </option>
+                      ))
+                    ) : (
+                      <option value="">Geen beeldmodellen gevonden</option>
+                    )}
+                  </select>
+                </label>
+              ) : null}
+              {imageProvider === "modelslab" ? (
+                <label className="field">
+                  <span>ModelsLab beeldmodel</span>
+                  <select
+                    value={selectedModelsLabImageModel}
+                    onChange={(event) => setSelectedModelsLabImageModel(event.target.value)}
+                    disabled={!modelsLabImageModelOptions.length && !selectedModelsLabImageModel}
+                  >
+                    {modelsLabImageModelOptions.length ? (
+                      modelsLabImageModelOptions.map((model) => (
+                        <option value={model.id} key={model.id}>
+                          {model.label}
+                        </option>
+                      ))
+                    ) : (
+                      <option value="">Geen beeldmodellen gevonden</option>
+                    )}
+                  </select>
+                </label>
+              ) : null}
+              <label className="field">
+                <span>Laatste sessieprompt</span>
+                <textarea value={bookMakerPromptPreview || storyPrompt} onChange={(event) => setBookMakerPromptPreview(event.target.value)} rows={14} />
+              </label>
+              <div className="context-brief">
+                <small>AI</small>
+                <p>
+                  {aiProviderLabel(aiProvider)} · {activeModelLabel}
+                </p>
+                <small>Illustraties</small>
+                <p>
+                  {imageProvider === "grok"
+                    ? apiHealth?.xaiApi?.configured
+                      ? "Grok key opgeslagen"
+                      : "Grok key ontbreekt"
+                    : imageProvider === "modelslab"
+                      ? apiHealth?.modelslabApi?.configured
+                        ? "ModelsLab key opgeslagen"
+                        : "ModelsLab key ontbreekt"
+                      : apiHealth?.comfy?.workflowConfigured
+                        ? "Comfy workflow klaar"
+                        : "Comfy workflow ontbreekt"}
+                </p>
+              </div>
+            </aside>
+          </div>
+        </section>
+      ) : (
+      <>
       <aside className="reader-sidebar">
         <div className="brand-block">
           <BookOpen size={28} />
@@ -2114,7 +2711,6 @@ export function App() {
               <select value={aiProvider} onChange={(event) => setAiProvider(event.target.value as AiProvider)}>
                 <option value="local">Lokale Ollama</option>
                 <option value="deepseek">DeepSeek API</option>
-                <option value="grok">Grok API</option>
               </select>
             </label>
             <label className="field compact-field model-field">
@@ -2296,6 +2892,27 @@ export function App() {
               <span>Wis Grok key</span>
             </button>
           </div>
+          <label className="field">
+            <span>ModelsLab API key</span>
+            <input
+              type="password"
+              value={modelsLabApiKeyInput}
+              onChange={(event) => setModelsLabApiKeyInput(event.target.value)}
+              placeholder={apiHealth?.modelslabApi?.configured ? "opgeslagen" : "ModelsLab key"}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <div className="button-row">
+            <button type="button" className="quiet" onClick={() => void saveModelsLabKey()} disabled={modelsLabKeyBusy || !modelsLabApiKeyInput.trim()}>
+              {modelsLabKeyBusy ? <Loader2 size={16} /> : <Save size={16} />}
+              <span>ModelsLab key opslaan</span>
+            </button>
+            <button type="button" className="quiet" onClick={() => void clearModelsLabKey()} disabled={modelsLabKeyBusy || !apiHealth?.modelslabApi?.configured}>
+              <Trash2 size={16} />
+              <span>Wis ModelsLab key</span>
+            </button>
+          </div>
           <button type="button" className="quiet" onClick={() => void refreshApiHealth(true)} disabled={apiBusy}>
             {apiBusy ? <Loader2 size={16} /> : <RefreshCw size={16} />}
             <span>Status</span>
@@ -2307,6 +2924,7 @@ export function App() {
               {apiHealth?.context?.deepModel || "onbekend"}, DeepSeek {apiHealth?.deepseekApi?.configured ? apiHealth.deepseekApi.storyModel : "geen key"}, Grok{" "}
               {apiHealth?.xaiApi?.configured ? apiHealth.xaiApi.filmModel : "geen key"}, Grok beeld{" "}
               {apiHealth?.xaiApi?.configured ? apiHealth.xaiApi.imageModel || "standaard" : "geen key"},{" "}
+              ModelsLab {apiHealth?.modelslabApi?.configured ? apiHealth.modelslabApi.imageModel || "standaard" : "geen key"},{" "}
               {apiHealth?.storage?.audioFiles ?? 0} audiofiles, {apiHealth?.storage?.imageFiles ?? 0} beelden
             </small>
             <small>{modelCatalogStatus}</small>
@@ -2398,6 +3016,7 @@ export function App() {
               <select value={imageProvider} onChange={(event) => setImageProvider(event.target.value as ImageProvider)}>
                 <option value="comfy">ComfyUI lokaal</option>
                 <option value="grok">Grok Imagine</option>
+                <option value="modelslab">ModelsLab</option>
               </select>
             </label>
             {imageProvider === "grok" ? (
@@ -2410,6 +3029,26 @@ export function App() {
                 >
                   {grokImageModelOptions.length ? (
                     grokImageModelOptions.map((model) => (
+                      <option value={model.id} key={model.id}>
+                        {model.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">Geen beeldmodellen gevonden</option>
+                  )}
+                </select>
+              </label>
+            ) : null}
+            {imageProvider === "modelslab" ? (
+              <label className="field compact-field model-field">
+                <span>ModelsLab beeldmodel</span>
+                <select
+                  value={selectedModelsLabImageModel}
+                  onChange={(event) => setSelectedModelsLabImageModel(event.target.value)}
+                  disabled={!modelsLabImageModelOptions.length && !selectedModelsLabImageModel}
+                >
+                  {modelsLabImageModelOptions.length ? (
+                    modelsLabImageModelOptions.map((model) => (
                       <option value={model.id} key={model.id}>
                         {model.label}
                       </option>
@@ -2618,6 +3257,8 @@ export function App() {
           ))}
         </div>
       </aside>
+      </>
+      )}
     </main>
   );
 }
@@ -2650,7 +3291,9 @@ function responseProviderLabel(provider: string): string {
 }
 
 function imageProviderLabel(provider: ImageProvider): string {
-  return provider === "grok" ? "Grok Imagine" : "ComfyUI";
+  if (provider === "grok") return "Grok Imagine";
+  if (provider === "modelslab") return "ModelsLab";
+  return "ComfyUI";
 }
 
 function buildGuidedStoryPrompt(characters: string, plot: string, mainEvent: string): StoryPromptMeta {
@@ -2671,6 +3314,29 @@ function buildGuidedStoryPrompt(characters: string, plot: string, mainEvent: str
     prompt,
     updatedAt: new Date().toISOString(),
   };
+}
+
+function closestAllowedNumber(value: number, allowed: number[]): number {
+  const numericValue = Number.isFinite(value) ? value : allowed[0];
+  return allowed.reduce((best, current) => (Math.abs(current - numericValue) < Math.abs(best - numericValue) ? current : best), allowed[0]);
+}
+
+function toStoryLanguage(value: string): StoryLanguage {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.startsWith("nl") || normalized.includes("nederlands") || normalized.includes("dutch")) return "Nederlands";
+  if (normalized.startsWith("en") || normalized.includes("english")) return "English";
+  if (normalized.startsWith("de") || normalized.includes("deutsch") || normalized.includes("german")) return "Deutsch";
+  if (normalized.startsWith("fr") || normalized.includes("français") || normalized.includes("french")) return "Français";
+  if (normalized.startsWith("es") || normalized.includes("español") || normalized.includes("spanish")) return "Español";
+  return "Auto";
+}
+
+function isAiProvider(value: string): value is AiProvider {
+  return value === "local" || value === "api" || value === "deepseek" || value === "grok";
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function withSelectedModel(options: ModelOption[], selectedId: string): ModelOption[] {
@@ -2718,6 +3384,9 @@ function defaultApiBase(): string {
   }
   if (window.location.protocol === "tauri:") {
     return "http://127.0.0.1:1433";
+  }
+  if (window.location.protocol === "http:" || window.location.protocol === "https:") {
+    return window.location.origin;
   }
   return "";
 }

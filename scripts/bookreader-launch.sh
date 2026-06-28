@@ -75,7 +75,15 @@ try:
         and isinstance(models_payload.get("deepseekApi", {}).get("models"), list)
         and isinstance(models_payload.get("xaiApi", {}).get("models"), list)
         and isinstance(models_payload.get("xaiImageApi", {}).get("models"), list)
+        and isinstance(models_payload.get("modelslabImageApi", {}).get("models"), list)
     )
+    conn.close()
+
+    conn = http.client.HTTPConnection(host, port, timeout=1.0)
+    conn.request("GET", "/api/external/story-command/next")
+    response = conn.getresponse()
+    external_payload = json.loads(response.read().decode("utf-8") or "{}")
+    external_ok = response.status == 200 and "command" in external_payload
 except Exception:
     sys.exit(1)
 finally:
@@ -84,7 +92,7 @@ finally:
     except Exception:
         pass
 
-sys.exit(0 if projects_ok and library_ok and categories_ok and film_ok and models_ok else 1)
+sys.exit(0 if projects_ok and library_ok and categories_ok and film_ok and models_ok and external_ok else 1)
 PY
 }
 

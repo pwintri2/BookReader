@@ -58,6 +58,12 @@ export type ApiHealth = {
     filmModel: string;
     imageModel?: string;
   };
+  modelslabApi?: {
+    configured: boolean;
+    baseUrl: string;
+    endpoint?: string;
+    imageModel?: string;
+  };
   storage?: {
     outputDir: string;
     sqliteDb?: string;
@@ -102,6 +108,12 @@ export type ModelCatalogResponse = {
     models: ModelOption[];
     error?: string;
   };
+  modelslabImageApi: {
+    configured: boolean;
+    baseUrl: string;
+    models: ModelOption[];
+    error?: string;
+  };
   defaults: {
     local: {
       fastContext: string;
@@ -118,6 +130,9 @@ export type ModelCatalogResponse = {
       context: string;
       story: string;
       film: string;
+      image: string;
+    };
+    modelslab: {
       image: string;
     };
   };
@@ -152,6 +167,75 @@ export type StoryGenerateResponse = {
   requestedWords: number;
   language?: string;
   wordCount: number;
+  warnings?: string[];
+};
+
+export type ExternalStoryCommand = {
+  id: string;
+  type: "story-from-alice";
+  source: string;
+  createdAt: string;
+  characters: string;
+  plot: string;
+  mainEvent: string;
+  pages: number;
+  wordsPerPage?: number;
+  genre?: string;
+  tone?: string;
+  language?: string;
+  mode?: "fast" | "deep";
+  provider?: AiProvider;
+  model?: string;
+  autoGenerate?: boolean;
+};
+
+export type ExternalStoryCommandResponse = {
+  ok: boolean;
+  command: ExternalStoryCommand | null;
+};
+
+export type BookMakerMessage = {
+  role: "talle" | "john";
+  content: string;
+  createdAt?: string;
+};
+
+export type BookMakerInterviewRequest = {
+  messages: BookMakerMessage[];
+  provider?: AiProvider;
+  model?: string;
+  mode?: "fast" | "deep";
+};
+
+export type BookMakerInterviewResponse = {
+  ok: boolean;
+  provider: string;
+  model: string;
+  mode: "fast" | "deep";
+  reply: string;
+  fallbackUsed?: boolean;
+  warning?: string;
+};
+
+export type BookMakerPromptRequest = {
+  messages: BookMakerMessage[];
+  provider?: AiProvider;
+  model?: string;
+  mode?: "fast" | "deep";
+  language?: string;
+};
+
+export type BookMakerPromptResponse = {
+  ok: boolean;
+  provider: string;
+  model: string;
+  mode: "fast" | "deep";
+  characters: string;
+  plot: string;
+  mainEvent: string;
+  prompt: string;
+  fallbackUsed?: boolean;
+  warning?: string;
 };
 
 export type StoryRechapterRequest = {
@@ -279,7 +363,7 @@ export type IllustrationJob = {
   message?: string;
 };
 
-export type ImageProvider = "comfy" | "grok";
+export type ImageProvider = "comfy" | "grok" | "modelslab";
 
 export type IllustrationImage = {
   filename: string;
@@ -564,6 +648,24 @@ export async function generateStory(apiBase: string, payload: StoryGenerateReque
   });
 }
 
+export async function getNextExternalStoryCommand(apiBase: string): Promise<ExternalStoryCommandResponse> {
+  return requestJson<ExternalStoryCommandResponse>(apiBase, "/api/external/story-command/next");
+}
+
+export async function continueBookMakerInterview(apiBase: string, payload: BookMakerInterviewRequest): Promise<BookMakerInterviewResponse> {
+  return requestJson<BookMakerInterviewResponse>(apiBase, "/api/book-maker/interview", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function finalizeBookMakerPrompt(apiBase: string, payload: BookMakerPromptRequest): Promise<BookMakerPromptResponse> {
+  return requestJson<BookMakerPromptResponse>(apiBase, "/api/book-maker/prompt", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function rechapterStory(apiBase: string, payload: StoryRechapterRequest): Promise<StoryRechapterResponse> {
   return requestJson<StoryRechapterResponse>(apiBase, "/api/story/rechapter", {
     method: "POST",
@@ -594,6 +696,13 @@ export async function saveDeepSeekApiKey(apiBase: string, apiKey: string, clear 
 
 export async function saveXaiApiKey(apiBase: string, apiKey: string, clear = false): Promise<ApiKeySaveResponse> {
   return requestJson<ApiKeySaveResponse>(apiBase, "/api/settings/xai-key", {
+    method: "POST",
+    body: JSON.stringify({ apiKey, clear }),
+  });
+}
+
+export async function saveModelsLabApiKey(apiBase: string, apiKey: string, clear = false): Promise<ApiKeySaveResponse> {
+  return requestJson<ApiKeySaveResponse>(apiBase, "/api/settings/modelslab-key", {
     method: "POST",
     body: JSON.stringify({ apiKey, clear }),
   });
