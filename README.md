@@ -1,5 +1,7 @@
 # BookReader
 
+![BookReader reading desk with a digital book, local library, and illustration panels](docs/assets/bookreader-readme-hero.png)
+
 BookReader is een local-first leesdesk, verhalenmachine, Boek-maker en kleine illustratiestudio. De app leest lange teksten en projectbestanden, verdeelt ze in hoofdstukken, leest ze voor, maakt nieuwe verhalen, interviewt materiaal tot boekprompts, bewaart een SQL-bibliotheek en kan beelden, covers, portretten en filmplannen maken via lokale of API-modellen.
 
 De huidige architectuur bestaat uit:
