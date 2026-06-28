@@ -1,5 +1,7 @@
 # BookReader
 
+![BookReader reading desk with a digital book, local library, and illustration panels](docs/assets/bookreader-readme-hero.png)
+
 BookReader is a local-first reading desk, story machine and tiny illustration studio in one app.
 
 Drop in a long text, DOCX, PDF or saved BookReader project, and it turns the material into readable chapters. From there you can read aloud, generate new stories, keep a local shelf of saved projects, reuse reference documents as story continuity, and create illustrations through a local ComfyUI workflow.
